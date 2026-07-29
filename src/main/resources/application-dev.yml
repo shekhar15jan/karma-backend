@@ -1,0 +1,13 @@
+spring:
+  jpa:
+    show-sql: true
+  devtools:
+    restart:
+      enabled: true
+    livereload:
+      enabled: true
+
+logging:
+  level:
+    com.karmaos: DEBUG
+    org.springframework.security: DEBUG

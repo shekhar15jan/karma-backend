@@ -1,0 +1,11 @@
+spring:
+  jpa:
+    show-sql: false
+
+logging:
+  level:
+    com.karmaos: WARN
+
+app:
+  cors:
+    allowed-origins: https://app.karmaos.com
