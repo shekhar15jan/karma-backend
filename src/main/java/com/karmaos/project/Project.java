@@ -29,6 +29,7 @@ public class Project extends BaseEntity {
     @Column(length = 50)
     private String category;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '[]'::jsonb")
     private String tags = "[]";
 

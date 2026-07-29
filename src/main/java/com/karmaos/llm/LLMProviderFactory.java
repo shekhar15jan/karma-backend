@@ -38,9 +38,11 @@ public class LLMProviderFactory {
         String type = providerType.toLowerCase();
         String key = apiKey != null ? apiKey : "";
         return switch (type) {
-            case "openai" -> new OpenAiProvider(key, webClientBuilder, objectMapper);
-            case "anthropic" -> new AnthropicProvider(key, webClientBuilder, objectMapper);
-            case "gemini" -> new GeminiProvider(key, webClientBuilder, objectMapper);
+            case "openai"      -> new OpenAiProvider(key, webClientBuilder, objectMapper);
+            case "anthropic"   -> new AnthropicProvider(key, webClientBuilder, objectMapper);
+            case "gemini"      -> new GeminiProvider(key, webClientBuilder, objectMapper);
+            case "openrouter"  -> new OpenRouterProvider(key, webClientBuilder, objectMapper);
+            case "opencode"    -> new OpenCodeProvider(key, webClientBuilder, objectMapper);
             default -> throw new IllegalArgumentException("Unsupported provider type: " + providerType);
         };
     }
@@ -51,15 +53,30 @@ public class LLMProviderFactory {
             @Override public String getDefaultModel() { return "mock-model"; }
             @Override public List<String> getAvailableModels() { return List.of("mock-model"); }
             @Override public LLMResponse chat(LLMRequest request) {
-                return LLMResponse.ok(
-                    "Mock response for: " + (request.getUserMessage() != null ? request.getUserMessage() : "no message"),
-                    "mock-model", 10, 20, 5
-                );
+                try {
+                    String msg = request.getUserMessage() != null ? request.getUserMessage() : "no message";
+                    // Truncate to avoid massive DB payloads in mock mode
+                    if (msg.length() > 500) msg = msg.substring(0, 500) + "...";
+                    String safeMessage = objectMapper.writeValueAsString(msg);
+                    String jsonResponse = "{ \"mock\": " + safeMessage + " }";
+                    return LLMResponse.ok(jsonResponse, "mock-model", 10, 20, 5);
+                } catch (Exception e) {
+                    return LLMResponse.ok("{\"mock\":\"fallback\"}", "mock-model", 10, 20, 5);
+                }
             }
             @Override public LLMResponse chatWithStream(LLMRequest request, Consumer<String> onChunk) {
-                String msg = "Mock streaming: " + request.getUserMessage();
-                onChunk.accept(msg);
-                return LLMResponse.ok(msg, "mock-model", 10, 20, 5);
+                try {
+                    String msg = request.getUserMessage() != null ? request.getUserMessage() : "no message";
+                    if (msg.length() > 500) msg = msg.substring(0, 500) + "...";
+                    String safeMessage = objectMapper.writeValueAsString(msg);
+                    String jsonResponse = "{ \"mock\": " + safeMessage + " }";
+                    onChunk.accept(jsonResponse);
+                    return LLMResponse.ok(jsonResponse, "mock-model", 10, 20, 5);
+                } catch (Exception e) {
+                    String fallback = "{\"mock\":\"streaming fallback\"}";
+                    onChunk.accept(fallback);
+                    return LLMResponse.ok(fallback, "mock-model", 10, 20, 5);
+                }
             }
             @Override public boolean testConnection() { return true; }
         };

@@ -15,11 +15,12 @@ public class UserPrincipal implements UserDetails {
 
     private UUID id;
     private String email;
+    private String password;
     private List<GrantedAuthority> authorities;
 
     @Override
     public String getPassword() {
-        return null;
+        return password;
     }
 
     @Override

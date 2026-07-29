@@ -2,11 +2,16 @@ package com.karmaos.mission;
 
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
+import com.karmaos.flow.FlowRepository;
+import com.karmaos.junction.MissionFlow;
+import com.karmaos.junction.MissionFlowId;
+import com.karmaos.junction.MissionFlowRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -14,9 +19,21 @@ import java.util.stream.Collectors;
 public class MissionService {
 
     private final MissionRepository missionRepository;
+    private final MissionFlowRepository missionFlowRepository;
+    private final FlowRepository flowRepository;
 
-    public MissionService(MissionRepository missionRepository) {
+    private static final Map<String, String> MISSION_TYPE_TO_FLOW_NAME = Map.of(
+        "VIDEO", "Video Generation Flow",
+        "BLOG", "Blog Generation Flow",
+        "SCRIPT", "Script Generation Flow"
+    );
+
+    public MissionService(MissionRepository missionRepository,
+                          MissionFlowRepository missionFlowRepository,
+                          FlowRepository flowRepository) {
         this.missionRepository = missionRepository;
+        this.missionFlowRepository = missionFlowRepository;
+        this.flowRepository = flowRepository;
     }
 
     public List<MissionResponse> listByProject(UUID projectId) {
@@ -44,7 +61,37 @@ public class MissionService {
         mission.setStatus("DRAFT");
         mission.setProgress(0);
         mission = missionRepository.save(mission);
+
+        linkFlowsToMission(mission, request);
+
         return toResponse(mission);
+    }
+
+    private void linkFlowsToMission(Mission mission, MissionRequest request) {
+        List<UUID> selectedFlowIds = request.getSelectedFlowIds();
+
+        if (selectedFlowIds != null && !selectedFlowIds.isEmpty()) {
+            for (int i = 0; i < selectedFlowIds.size(); i++) {
+                MissionFlow mf = new MissionFlow();
+                mf.setId(new MissionFlowId(mission.getId(), selectedFlowIds.get(i)));
+                mf.setExecOrder(i);
+                mf.setStatus("ACTIVE");
+                missionFlowRepository.save(mf);
+            }
+        } else {
+            String flowName = MISSION_TYPE_TO_FLOW_NAME.get(mission.getMissionType());
+            if (flowName != null) {
+                flowRepository.findByNameContainingIgnoreCase(flowName).stream()
+                    .findFirst()
+                    .ifPresent(flow -> {
+                        MissionFlow mf = new MissionFlow();
+                        mf.setId(new MissionFlowId(mission.getId(), flow.getId()));
+                        mf.setExecOrder(1);
+                        mf.setStatus("ACTIVE");
+                        missionFlowRepository.save(mf);
+                    });
+            }
+        }
     }
 
     @Transactional

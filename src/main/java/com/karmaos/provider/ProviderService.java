@@ -42,8 +42,17 @@ public class ProviderService {
         provider.setName(request.getName());
         provider.setProviderType(request.getProviderType());
         provider.setApiEndpoint(request.getApiEndpoint());
-        if (request.getApiKey() != null) {
+        if (request.getApiKey() != null && !request.getApiKey().isBlank()) {
             provider.setEncryptedApiKey(request.getApiKey().getBytes());
+        }
+        // Serialize models list to JSON; default to empty array
+        try {
+            java.util.List<String> modelsList = request.getModels() != null ? request.getModels() : java.util.List.of();
+            provider.setModels(objectMapper.writeValueAsString(modelsList));
+            provider.setCapabilities("[]");
+        } catch (Exception e) {
+            provider.setModels("[]");
+            provider.setCapabilities("[]");
         }
         provider.setStatus("CONNECTED");
         provider = providerRepository.save(provider);
@@ -57,8 +66,13 @@ public class ProviderService {
         provider.setName(request.getName());
         provider.setProviderType(request.getProviderType());
         provider.setApiEndpoint(request.getApiEndpoint());
-        if (request.getApiKey() != null) {
+        if (request.getApiKey() != null && !request.getApiKey().isBlank()) {
             provider.setEncryptedApiKey(request.getApiKey().getBytes());
+        }
+        if (request.getModels() != null) {
+            try {
+                provider.setModels(objectMapper.writeValueAsString(request.getModels()));
+            } catch (Exception ignored) {}
         }
         provider = providerRepository.save(provider);
         return toResponse(provider);

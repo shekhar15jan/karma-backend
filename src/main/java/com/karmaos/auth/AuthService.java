@@ -73,6 +73,27 @@ public class AuthService {
                 .build();
     }
 
+    public AuthResponse devBypass(LoginRequest request) {
+        User user = userRepository.findByEmail(request.getEmail()).orElseGet(() -> {
+            User newUser = new User(request.getEmail(), passwordEncoder.encode(request.getPassword()), "Dev User");
+            newUser.setRole("ADMIN");
+            return userRepository.save(newUser);
+        });
+
+        String accessToken = tokenProvider.generateAccessToken(user.getId(), user.getEmail(), java.util.List.of("ROLE_" + user.getRole()));
+        String refreshToken = tokenProvider.generateRefreshToken(user.getId());
+
+        return AuthResponse.builder()
+                .userId(user.getId())
+                .email(user.getEmail())
+                .displayName(user.getDisplayName())
+                .role(user.getRole())
+                .avatarUrl(user.getAvatarUrl())
+                .accessToken(accessToken)
+                .refreshToken(refreshToken)
+                .build();
+    }
+
     public AuthResponse refresh(RefreshTokenRequest request) {
         if (!tokenProvider.validateToken(request.getRefreshToken())) {
             throw ErrorCode.TOKEN_INVALID.exception("Invalid refresh token");

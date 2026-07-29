@@ -48,6 +48,7 @@ public class Mission extends BaseEntity {
     @Column(name = "completed_at")
     private LocalDateTime completedAt;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "execution_plan", columnDefinition = "JSONB")
     private String executionPlan;
 }

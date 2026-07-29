@@ -37,9 +37,11 @@ public class ExecutionStep extends BaseEntity {
     @Column(nullable = false, length = 50)
     private String status = "PENDING";
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "input_data", columnDefinition = "JSONB")
     private String inputData;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "output_data", columnDefinition = "JSONB")
     private String outputData;
 

@@ -24,4 +24,5 @@ public class ProviderRequest {
     private String apiKey;
     private String apiEndpoint;
     private Object configuration;
+    private java.util.List<String> models;
 }

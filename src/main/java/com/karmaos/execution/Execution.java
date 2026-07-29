@@ -46,6 +46,7 @@ public class Execution extends BaseEntity {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String metadata = "{}";
 }

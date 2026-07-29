@@ -7,6 +7,8 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(name = "providers")
@@ -27,18 +29,22 @@ public class Provider extends BaseEntity {
     @Column(name = "encrypted_api_key", columnDefinition = "BYTEA")
     private byte[] encryptedApiKey;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '[]'::jsonb")
     private String models = "[]";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '[]'::jsonb")
     private String capabilities = "[]";
 
     @Column(nullable = false, length = 50)
     private String status = "DISCONNECTED";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String configuration = "{}";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String health = "{}";
 }
