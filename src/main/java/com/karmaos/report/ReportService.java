@@ -1,12 +1,15 @@
 package com.karmaos.report;
 
 import com.karmaos.artifact.ArtifactRepository;
+import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionRepository;
+import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
 import com.karmaos.project.ProjectRepository;
 import com.karmaos.provider.ProviderRepository;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -56,14 +59,30 @@ public class ReportService {
         long failed = missionRepository.countByStatus("FAILED");
         long inProgress = missionRepository.countByStatus("RUNNING");
 
+        List<Execution> allExecutions = executionRepository.findAll();
+        double avgDuration = allExecutions.stream()
+                .filter(e -> e.getDurationMs() != null)
+                .mapToLong(Execution::getDurationMs)
+                .average()
+                .orElse(0);
+        double avgCost = allExecutions.stream()
+                .filter(e -> e.getTotalCost() != null)
+                .mapToDouble(e -> e.getTotalCost().doubleValue())
+                .average()
+                .orElse(0);
+
+        Map<String, Long> byType = missionRepository.findAll().stream()
+                .filter(m -> m.getMissionType() != null)
+                .collect(Collectors.groupingBy(Mission::getMissionType, Collectors.counting()));
+
         return Map.of(
                 "totalMissions", totalMissions,
                 "completed", completed,
                 "failed", failed,
                 "inProgress", inProgress,
-                "avgDuration", 0,
-                "avgCost", 0,
-                "byType", Map.of(),
+                "avgDuration", avgDuration,
+                "avgCost", avgCost,
+                "byType", byType,
                 "trend", java.util.Collections.emptyList());
     }
 }

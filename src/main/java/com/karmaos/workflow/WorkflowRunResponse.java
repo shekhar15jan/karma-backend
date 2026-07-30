@@ -17,6 +17,8 @@ public class WorkflowRunResponse {
     private UUID id;
     private UUID workflowId;
     private UUID projectId;
+    private UUID executionId;
+    private UUID missionId;
     private String workflowName;
     private String status;
     private LocalDateTime startedAt;

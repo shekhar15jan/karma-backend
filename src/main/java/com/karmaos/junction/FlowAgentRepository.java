@@ -9,6 +9,8 @@ import java.util.UUID;
 @Repository
 public interface FlowAgentRepository extends JpaRepository<FlowAgent, FlowAgentId> {
 
+    List<FlowAgent> findByIdFlowIdOrderByStepOrderAsc(UUID flowId);
+
     List<FlowAgent> findByIdFlowId(UUID flowId);
 
     List<FlowAgent> findByIdAgentId(UUID agentId);

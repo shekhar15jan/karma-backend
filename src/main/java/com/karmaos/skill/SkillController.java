@@ -53,4 +53,10 @@ public class SkillController {
         skillService.delete(id);
         return ResponseEntity.ok(ApiResponse.ok(null, "Skill deleted"));
     }
+
+    @PostMapping("/{id}/install")
+    public ResponseEntity<ApiResponse<Void>> install(@PathVariable UUID id) {
+        skillService.install(id);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Skill installed"));
+    }
 }

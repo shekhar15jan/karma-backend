@@ -25,24 +25,27 @@ public class LLMProviderFactory {
         this.objectMapper = objectMapper;
     }
 
-    public LLMProvider getProvider(String providerType, String apiKey) {
+    public LLMProvider getProvider(String providerType, String apiKey, String apiEndpoint) {
         String key = providerType.toLowerCase() + ":" + (apiKey != null ? apiKey.hashCode() : "null");
-        return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey));
+        return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey, apiEndpoint));
+    }
+
+    public LLMProvider getProvider(String providerType, String apiKey) {
+        return getProvider(providerType, apiKey, null);
     }
 
     public LLMProvider getProviderForType(String providerType) {
-        return getProvider(providerType, null);
+        return getProvider(providerType, null, null);
     }
 
-    private LLMProvider createProvider(String providerType, String apiKey) {
+    private LLMProvider createProvider(String providerType, String apiKey, String apiEndpoint) {
         String type = providerType.toLowerCase();
-        String key = apiKey != null ? apiKey : "";
         return switch (type) {
-            case "openai"      -> new OpenAiProvider(key, webClientBuilder, objectMapper);
-            case "anthropic"   -> new AnthropicProvider(key, webClientBuilder, objectMapper);
-            case "gemini"      -> new GeminiProvider(key, webClientBuilder, objectMapper);
-            case "openrouter"  -> new OpenRouterProvider(key, webClientBuilder, objectMapper);
-            case "opencode"    -> new OpenCodeProvider(key, webClientBuilder, objectMapper);
+            case "openai"      -> new OpenAiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
+            case "anthropic"   -> new AnthropicProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
+            case "gemini"      -> new GeminiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
+            case "openrouter"  -> new OpenRouterProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
+            case "opencode"    -> new OpenCodeProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper, apiEndpoint);
             default -> throw new IllegalArgumentException("Unsupported provider type: " + providerType);
         };
     }

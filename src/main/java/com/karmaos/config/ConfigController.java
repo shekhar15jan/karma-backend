@@ -1,5 +1,7 @@
 package com.karmaos.config;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
 import com.karmaos.settings.SettingsRequest;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
 
@@ -21,9 +24,11 @@ import java.util.UUID;
 public class ConfigController {
 
     private final SettingsService settingsService;
+    private final ObjectMapper objectMapper;
 
-    public ConfigController(SettingsService settingsService) {
+    public ConfigController(SettingsService settingsService, ObjectMapper objectMapper) {
         this.settingsService = settingsService;
+        this.objectMapper = objectMapper;
     }
 
     @GetMapping
@@ -32,24 +37,15 @@ public class ConfigController {
             @RequestParam(required = false) UUID userId) {
         try {
             SettingsResponse settings = settingsService.getByWorkspaceAndUser(workspaceId, userId);
-            return ResponseEntity.ok(ApiResponse.ok(
-                    Map.of("settings", settings.getSettingsData(),
-                            "theme", "dark",
-                            "language", "en-US",
-                            "notifications", Map.of(
-                                    "missionComplete", true,
-                                    "missionFailed", true,
-                                    "reviewRequired", true,
-                                    "publishComplete", true))));
+            Map<String, Object> data = Collections.emptyMap();
+            if (settings != null && settings.getSettingsData() != null) {
+                try {
+                    data = objectMapper.readValue(settings.getSettingsData(), new TypeReference<Map<String, Object>>() {});
+                } catch (Exception ignored) {}
+            }
+            return ResponseEntity.ok(ApiResponse.ok(data));
         } catch (Exception e) {
-            return ResponseEntity.ok(ApiResponse.ok(Map.of(
-                    "theme", "dark",
-                    "language", "en-US",
-                    "notifications", Map.of(
-                            "missionComplete", true,
-                            "missionFailed", true,
-                            "reviewRequired", true,
-                            "publishComplete", true))));
+            return ResponseEntity.ok(ApiResponse.ok(Collections.emptyMap()));
         }
     }
 
@@ -58,11 +54,21 @@ public class ConfigController {
             @RequestBody Map<String, Object> config,
             @RequestParam(required = false) UUID workspaceId,
             @RequestParam(required = false) UUID userId) {
-        SettingsRequest request = SettingsRequest.builder()
-                .workspaceId(workspaceId)
-                .userId(userId)
-                .settingsData(config.toString())
-                .build();
-        return ResponseEntity.ok(ApiResponse.ok(settingsService.save(request)));
+        try {
+            String json = objectMapper.writeValueAsString(config);
+            SettingsRequest request = SettingsRequest.builder()
+                    .workspaceId(workspaceId)
+                    .userId(userId)
+                    .settingsData(json)
+                    .build();
+            return ResponseEntity.ok(ApiResponse.ok(settingsService.save(request)));
+        } catch (Exception e) {
+            SettingsRequest request = SettingsRequest.builder()
+                    .workspaceId(workspaceId)
+                    .userId(userId)
+                    .settingsData(config.toString())
+                    .build();
+            return ResponseEntity.ok(ApiResponse.ok(settingsService.save(request)));
+        }
     }
 }

@@ -62,6 +62,14 @@ public class SkillService {
         skillRepository.save(skill);
     }
 
+    @Transactional
+    public void install(UUID id) {
+        Skill skill = skillRepository.findById(id)
+                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Skill not found: " + id));
+        skill.setStatus("INSTALLED");
+        skillRepository.save(skill);
+    }
+
     private SkillResponse toResponse(Skill s) {
         return SkillResponse.builder()
                 .id(s.getId())

@@ -2,6 +2,7 @@ package com.karmaos.knowledge;
 
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -11,10 +12,13 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -28,8 +32,18 @@ public class KnowledgePackController {
     }
 
     @GetMapping
-    public ResponseEntity<ApiResponse<List<KnowledgePackResponse>>> list(@RequestParam UUID workspaceId) {
-        return ResponseEntity.ok(ApiResponse.ok(knowledgePackService.listByWorkspace(workspaceId)));
+    public ResponseEntity<ApiResponse<List<KnowledgePackResponse>>> list(@RequestParam(required = false) UUID workspaceId) {
+        if (workspaceId != null) {
+            return ResponseEntity.ok(ApiResponse.ok(knowledgePackService.listByWorkspace(workspaceId)));
+        }
+        return ResponseEntity.ok(ApiResponse.ok(knowledgePackService.listAll()));
+    }
+
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ApiResponse<Map<String, Object>>> uploadFile(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(required = false) UUID workspaceId) {
+        return ResponseEntity.ok(ApiResponse.ok(knowledgePackService.uploadFile(file, workspaceId)));
     }
 
     @GetMapping("/{id}")

@@ -23,6 +23,13 @@ public class ArtifactService {
         this.objectMapper = objectMapper;
     }
 
+    public List<ArtifactResponse> listAll() {
+        return artifactRepository.findAll()
+                .stream()
+                .map(this::toResponse)
+                .collect(Collectors.toList());
+    }
+
     public List<ArtifactResponse> listByMission(UUID missionId) {
         return artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId)
                 .stream()

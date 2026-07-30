@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -34,6 +35,11 @@ public class ProviderController {
     @GetMapping("/{id}")
     public ResponseEntity<ApiResponse<ProviderResponse>> get(@PathVariable UUID id) {
         return ResponseEntity.ok(ApiResponse.ok(providerService.getById(id)));
+    }
+
+    @PostMapping("/{id}/test")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> testConnection(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(providerService.testConnection(id)));
     }
 
     @PostMapping

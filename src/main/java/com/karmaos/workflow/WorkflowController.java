@@ -1,8 +1,10 @@
 package com.karmaos.workflow;
 
+import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,7 +43,10 @@ public class WorkflowController {
     }
 
     @PostMapping("/run")
-    public ResponseEntity<ApiResponse<WorkflowRunResponse>> runWorkflow(@RequestBody WorkflowDefinitionRequest request) {
-        return ResponseEntity.ok(ApiResponse.ok(workflowService.execute(request.getName(), null)));
+    public ResponseEntity<ApiResponse<WorkflowRunResponse>> runWorkflow(
+            @RequestBody WorkflowDefinitionRequest request,
+            @AuthenticationPrincipal UserPrincipal user) {
+        UUID userId = user != null ? user.getId() : UUID.fromString("00000000-0000-0000-0000-000000000001");
+        return ResponseEntity.ok(ApiResponse.ok(workflowService.execute(request, userId)));
     }
 }

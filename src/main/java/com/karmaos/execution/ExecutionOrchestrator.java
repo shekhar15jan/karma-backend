@@ -1,11 +1,15 @@
 package com.karmaos.execution;
 
 import com.karmaos.agent.AgentRuntimeService;
+import com.karmaos.artifact.Artifact;
+import com.karmaos.artifact.ArtifactRepository;
+import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.FlowAgent;
 import com.karmaos.junction.FlowAgentRepository;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowRepository;
+import com.karmaos.media.MediaOrchestrationService;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
 import org.slf4j.Logger;
@@ -31,6 +35,8 @@ public class ExecutionOrchestrator {
     private final ExecutionStepRepository stepRepository;
     private final ExecutionService executionService;
     private final AgentRuntimeService agentRuntimeService;
+    private final MediaOrchestrationService mediaOrchestrationService;
+    private final ArtifactRepository artifactRepository;
 
     private final Map<UUID, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -42,7 +48,9 @@ public class ExecutionOrchestrator {
                                  ExecutionRepository executionRepository,
                                  ExecutionStepRepository stepRepository,
                                  ExecutionService executionService,
-                                 AgentRuntimeService agentRuntimeService) {
+                                 AgentRuntimeService agentRuntimeService,
+                                 MediaOrchestrationService mediaOrchestrationService,
+                                 ArtifactRepository artifactRepository) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
@@ -51,6 +59,8 @@ public class ExecutionOrchestrator {
         this.stepRepository = stepRepository;
         this.executionService = executionService;
         this.agentRuntimeService = agentRuntimeService;
+        this.mediaOrchestrationService = mediaOrchestrationService;
+        this.artifactRepository = artifactRepository;
     }
 
     @Transactional
@@ -101,28 +111,49 @@ public class ExecutionOrchestrator {
         missionFlows.sort(Comparator.comparingInt(MissionFlow::getExecOrder));
 
         try {
-            // Resolve DAG: build adjacency from exec_order (sequential by default)
-            // For each flow in order, get agents and execute them
             String previousOutput = null;
             int globalStepOrder = 0;
+            Set<UUID> mediaFlows = new HashSet<>();
 
             for (MissionFlow mf : missionFlows) {
                 UUID flowId = mf.getId().getFlowId();
-                List<FlowAgent> flowAgents = flowAgentRepository.findByIdFlowId(flowId);
+                Flow flow = flowRepository.findById(flowId).orElse(null);
+                if (flow == null) continue;
 
+                List<FlowAgent> flowAgents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
                 if (flowAgents.isEmpty()) {
                     log.warn("No agents assigned to flow {}", flowId);
                     continue;
                 }
 
-                // Execute agents within a flow sequentially
+                String category = flow.getCategory() != null ? flow.getCategory() : "";
+                String flowName = flow.getName() != null ? flow.getName().toLowerCase() : "";
+
                 for (FlowAgent fa : flowAgents) {
                     UUID agentId = fa.getId().getAgentId();
+                    ExecutionStep step;
 
-                    ExecutionStep step = agentRuntimeService.executeAgentStep(
-                        executionId, flowId, agentId, globalStepOrder++,
-                        previousOutput, missionId
-                    );
+                    if ("PUBLISHING".equals(category)) {
+                        step = mediaOrchestrationService.executePublishStep(
+                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
+                        mediaFlows.add(flowId);
+                    } else if ("MEDIA".equals(category) && (flowName.contains("image") || flowName.contains("thumbnail"))) {
+                        step = mediaOrchestrationService.executeImageStep(
+                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
+                        mediaFlows.add(flowId);
+                    } else if ("MEDIA".equals(category) && (flowName.contains("voice") || flowName.contains("audio"))) {
+                        step = mediaOrchestrationService.executeVoiceStep(
+                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
+                        mediaFlows.add(flowId);
+                    } else if ("MEDIA".equals(category) && (flowName.contains("video"))) {
+                        step = mediaOrchestrationService.executeVideoStep(
+                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
+                        mediaFlows.add(flowId);
+                    } else {
+                        step = agentRuntimeService.executeAgentStep(
+                            executionId, flowId, agentId, globalStepOrder++,
+                            previousOutput, missionId);
+                    }
 
                     if ("COMPLETED".equals(step.getStatus())) {
                         previousOutput = step.getOutputData();
@@ -135,6 +166,8 @@ public class ExecutionOrchestrator {
                 }
             }
 
+            createArtifactsFromOutput(execution, missionFlows, previousOutput, mediaFlows);
+
             executionService.complete(executionId, "COMPLETED", null);
             updateMissionStatus(missionId, "COMPLETED");
 
@@ -142,6 +175,45 @@ public class ExecutionOrchestrator {
             log.error("Execution {} failed with exception", executionId, e);
             executionService.complete(executionId, "FAILED", e.getMessage());
             updateMissionStatus(missionId, "FAILED");
+        }
+    }
+
+    private void createArtifactsFromOutput(Execution execution, List<MissionFlow> missionFlows,
+                                           String finalOutput, Set<UUID> mediaFlows) {
+        if (finalOutput == null || finalOutput.isBlank()) return;
+        UUID missionId = execution.getMissionId();
+
+        for (MissionFlow mf : missionFlows) {
+            UUID flowId = mf.getId().getFlowId();
+            if (mediaFlows.contains(flowId)) continue;
+
+            Flow flow = flowRepository.findById(flowId).orElse(null);
+            if (flow == null) continue;
+
+            List<FlowAgent> agents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
+            if (agents.isEmpty()) continue;
+
+            String artifactType = switch (flow.getCategory() != null ? flow.getCategory() : "") {
+                case "RESEARCH" -> "RESEARCH";
+                case "PLANNING" -> "PLAN";
+                case "CONTENT" -> "SCRIPT";
+                case "MEDIA" -> "MEDIA_ASSET";
+                case "REVIEW" -> "REVIEW_REPORT";
+                case "PUBLISHING" -> "PUBLICATION";
+                case "DESIGNER" -> "WORKFLOW_OUTPUT";
+                default -> "GENERAL";
+            };
+
+            Artifact artifact = new Artifact();
+            artifact.setMissionId(missionId);
+            artifact.setName(flow.getName() + " Output");
+            artifact.setArtifactType(artifactType);
+            artifact.setStatus("COMPLETED");
+            artifact.setContentText(finalOutput);
+            artifact.setContentType("text/markdown");
+            artifact.setReviewStatus("PENDING");
+            artifact.setPublicationStatus("UNPUBLISHED");
+            artifactRepository.save(artifact);
         }
     }
 

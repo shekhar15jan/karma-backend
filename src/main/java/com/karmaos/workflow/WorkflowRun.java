@@ -32,6 +32,15 @@ public class WorkflowRun {
     @Column(name = "project_id")
     private UUID projectId;
 
+    @Column(name = "execution_id")
+    private UUID executionId;
+
+    @Column(name = "mission_id")
+    private UUID missionId;
+
+    @Column(name = "flow_id")
+    private UUID flowId;
+
     @Column(name = "workflow_name", nullable = false, length = 255)
     private String workflowName;
 

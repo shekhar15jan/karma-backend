@@ -18,6 +18,8 @@ import com.karmaos.skill.Skill;
 import com.karmaos.skill.SkillRepository;
 import com.karmaos.sourcedocument.SourceDocument;
 import com.karmaos.sourcedocument.SourceDocumentRepository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -51,6 +53,7 @@ public class AgentRuntimeService {
     private final AgentRepository agentRepository;
     private final SourceDocumentRepository sourceDocumentRepository;
     private final ExecutionService executionService;
+    private final ObjectMapper objectMapper;
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
                                ProviderRepository providerRepository,
@@ -60,7 +63,8 @@ public class AgentRuntimeService {
                                AgentSkillRepository agentSkillRepository,
                                AgentRepository agentRepository,
                                SourceDocumentRepository sourceDocumentRepository,
-                               ExecutionService executionService) {
+                               ExecutionService executionService,
+                               ObjectMapper objectMapper) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
         this.promptRepository = promptRepository;
@@ -70,6 +74,7 @@ public class AgentRuntimeService {
         this.agentRepository = agentRepository;
         this.sourceDocumentRepository = sourceDocumentRepository;
         this.executionService = executionService;
+        this.objectMapper = objectMapper;
     }
 
     public ExecutionStep executeAgentStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
@@ -104,7 +109,7 @@ public class AgentRuntimeService {
 
             LLMRequest request = new LLMRequest(systemPrompt, userMessage);
             request.setModel(modelUsed);
-            request.setTemperature(0.7);
+            request.setTemperature(resolveTemperature(agent));
 
             LLMResponse response = llmProvider.chat(request);
 
@@ -186,6 +191,17 @@ public class AgentRuntimeService {
         return sb.toString();
     }
 
+    private double resolveTemperature(Agent agent) {
+        if (agent == null || agent.getConfiguration() == null) return 0.7;
+        try {
+            JsonNode config = objectMapper.readTree(agent.getConfiguration());
+            if (config.has("temperature")) {
+                return config.get("temperature").asDouble();
+            }
+        } catch (Exception ignored) {}
+        return 0.7;
+    }
+
     private Provider resolveProvider(Agent agent) {
         if (agent == null) return null;
         UUID providerId = agent.getDefaultProviderId();
@@ -203,7 +219,7 @@ public class AgentRuntimeService {
         try {
             String apiKey = provider.getEncryptedApiKey() != null
                 ? new String(provider.getEncryptedApiKey()) : "";
-            return providerFactory.getProvider(provider.getProviderType(), apiKey);
+            return providerFactory.getProvider(provider.getProviderType(), apiKey, provider.getApiEndpoint());
         } catch (Exception e) {
             log.warn("Failed to create provider for type={}, using mock", provider.getProviderType(), e);
             return providerFactory.getFallbackProvider();

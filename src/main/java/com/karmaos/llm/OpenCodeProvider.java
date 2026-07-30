@@ -20,23 +20,26 @@ import java.util.function.Consumer;
  * through a local proxy on http://localhost:29763
  *
  * API key: use your OpenCode session token or leave blank if no auth is configured.
- * Base URL: http://host.docker.internal:29763 (from inside Docker container)
+ * Base URL: configurable via api_endpoint, defaults to http://localhost:29763/v1
  */
 public class OpenCodeProvider implements LLMProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenCodeProvider.class);
 
-    // host.docker.internal resolves to the host machine from inside Docker
-    private static final String BASE_URL = "http://host.docker.internal:29763/v1/chat/completions";
+    private static final String DEFAULT_BASE_URL = "http://localhost:29763/v1/chat/completions";
 
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
     private final String apiKey;
+    private final String baseUrl;
 
-    public OpenCodeProvider(String apiKey, WebClient.Builder webClientBuilder, ObjectMapper objectMapper) {
+    public OpenCodeProvider(String apiKey, WebClient.Builder webClientBuilder, ObjectMapper objectMapper, String apiEndpoint) {
         this.apiKey = apiKey;
         this.objectMapper = objectMapper;
         this.webClient = webClientBuilder.build();
+        this.baseUrl = (apiEndpoint != null && !apiEndpoint.isBlank())
+            ? apiEndpoint + "/chat/completions"
+            : DEFAULT_BASE_URL;
     }
 
     @Override
@@ -83,7 +86,7 @@ public class OpenCodeProvider implements LLMProvider {
             );
 
             var requestSpec = webClient.post()
-                .uri(BASE_URL)
+                .uri(baseUrl)
                 .contentType(MediaType.APPLICATION_JSON);
 
             // Include API key only if provided

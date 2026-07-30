@@ -7,8 +7,14 @@ import com.karmaos.common.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -76,6 +82,41 @@ public class ProviderService {
         }
         provider = providerRepository.save(provider);
         return toResponse(provider);
+    }
+
+    public Map<String, Object> testConnection(UUID id) {
+        Provider provider = providerRepository.findById(id)
+                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Provider not found: " + id));
+
+        String endpoint = provider.getApiEndpoint();
+        if (endpoint == null || endpoint.isBlank()) {
+            return Map.of("success", false, "message", "No API endpoint configured");
+        }
+
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .build();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(5))
+                    .GET()
+                    .build();
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            int status = response.statusCode();
+            boolean success = status >= 200 && status < 500;
+            provider.setStatus(success ? "CONNECTED" : "ERROR");
+            providerRepository.save(provider);
+            return Map.of(
+                    "success", success,
+                    "status", status,
+                    "message", success ? "Connection successful" : "Received status " + status
+            );
+        } catch (Exception e) {
+            provider.setStatus("ERROR");
+            providerRepository.save(provider);
+            return Map.of("success", false, "message", "Connection failed: " + e.getMessage());
+        }
     }
 
     @Transactional

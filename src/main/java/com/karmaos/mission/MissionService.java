@@ -2,10 +2,12 @@ package com.karmaos.mission;
 
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
+import com.karmaos.execution.ExecutionOrchestrator;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowId;
 import com.karmaos.junction.MissionFlowRepository;
+import com.karmaos.execution.Execution;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,6 +23,7 @@ public class MissionService {
     private final MissionRepository missionRepository;
     private final MissionFlowRepository missionFlowRepository;
     private final FlowRepository flowRepository;
+    private final ExecutionOrchestrator orchestrator;
 
     private static final Map<String, String> MISSION_TYPE_TO_FLOW_NAME = Map.of(
         "VIDEO", "Video Generation Flow",
@@ -30,10 +33,12 @@ public class MissionService {
 
     public MissionService(MissionRepository missionRepository,
                           MissionFlowRepository missionFlowRepository,
-                          FlowRepository flowRepository) {
+                          FlowRepository flowRepository,
+                          ExecutionOrchestrator orchestrator) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
+        this.orchestrator = orchestrator;
     }
 
     public List<MissionResponse> listByProject(UUID projectId) {
@@ -123,6 +128,10 @@ public class MissionService {
         mission.setStartedAt(LocalDateTime.now());
         mission.setProgress(0);
         mission = missionRepository.save(mission);
+
+        Execution execution = orchestrator.startExecution(mission.getId());
+        orchestrator.executeAsync(execution.getId());
+
         return toResponse(mission);
     }
 
