@@ -30,10 +30,10 @@ public class GoogleImageProvider implements ImageProvider {
     public String getName() { return "Google Imagen"; }
 
     @Override
-    public String getDefaultModel() { return "imagen-3.0-generate-001"; }
+    public String getDefaultModel() { return "imagen-4.0-generate-001"; }
 
     @Override
-    public List<String> getAvailableModels() { return List.of("imagen-3.0-generate-001", "imagen-3.0-fast-generate-001"); }
+    public List<String> getAvailableModels() { return List.of("imagen-4.0-generate-001", "imagen-4.0-fast-generate-001", "imagen-4.0-ultra-generate-001"); }
 
     @Override
     public ImageResponse generate(ImageRequest request) {
@@ -44,7 +44,7 @@ public class GoogleImageProvider implements ImageProvider {
 
         long start = System.currentTimeMillis();
         try {
-            String model = "imagen-3.0-generate-001";
+            String model = request.getModel() != null ? request.getModel() : "imagen-4.0-generate-001";
             String url = "https://generativelanguage.googleapis.com/v1beta/models/"
                 + model + ":predict?key=" + apiKey;
 
@@ -84,7 +84,7 @@ public class GoogleImageProvider implements ImageProvider {
     }
 
     private ImageResponse tryGeminiNativeImageGen(ImageRequest request, long latency) {
-        String model = "gemini-2.0-flash-exp";
+        String model = "gemini-2.5-flash";
         String url = "https://generativelanguage.googleapis.com/v1beta/models/"
             + model + ":generateContent?key=" + apiKey;
 

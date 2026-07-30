@@ -7,6 +7,9 @@ import com.karmaos.common.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.karmaos.media.EdgeTtsProvider;
+import com.karmaos.media.VoiceProvider;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -15,6 +18,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -84,9 +88,17 @@ public class ProviderService {
         return toResponse(provider);
     }
 
+    private static final Set<String> CLI_BASED_PROVIDERS = Set.of("edge-tts", "edge", "ffmpeg");
+
     public Map<String, Object> testConnection(UUID id) {
         Provider provider = providerRepository.findById(id)
                 .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Provider not found: " + id));
+
+        String type = provider.getProviderType().toLowerCase();
+
+        if (CLI_BASED_PROVIDERS.contains(type)) {
+            return testCliProvider(provider, type);
+        }
 
         String endpoint = provider.getApiEndpoint();
         if (endpoint == null || endpoint.isBlank()) {
@@ -111,6 +123,29 @@ public class ProviderService {
                     "success", success,
                     "status", status,
                     "message", success ? "Connection successful" : "Received status " + status
+            );
+        } catch (Exception e) {
+            provider.setStatus("ERROR");
+            providerRepository.save(provider);
+            return Map.of("success", false, "message", "Connection failed: " + e.getMessage());
+        }
+    }
+
+    private Map<String, Object> testCliProvider(Provider provider, String type) {
+        try {
+            VoiceProvider voiceProvider = switch (type) {
+                case "edge-tts", "edge" -> new EdgeTtsProvider();
+                default -> null;
+            };
+            if (voiceProvider == null) {
+                return Map.of("success", false, "message", "Unsupported CLI provider");
+            }
+            boolean ok = voiceProvider.testConnection();
+            provider.setStatus(ok ? "CONNECTED" : "ERROR");
+            providerRepository.save(provider);
+            return Map.of(
+                    "success", ok,
+                    "message", ok ? "Connection successful" : "CLI provider test failed"
             );
         } catch (Exception e) {
             provider.setStatus("ERROR");

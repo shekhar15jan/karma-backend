@@ -113,6 +113,19 @@ public class AgentRuntimeService {
 
             LLMResponse response = llmProvider.chat(request);
 
+            if (!response.isSuccess() && agent.getFallbackProviderId() != null) {
+                log.warn("Primary provider {} failed, trying fallback provider {}", provider != null ? provider.getName() : "none", agent.getFallbackProviderId());
+                provider = providerRepository.findById(agent.getFallbackProviderId()).orElse(null);
+                llmProvider = resolveLLMProvider(provider);
+                if (llmProvider != null && !llmProvider.getName().equals("mock")) {
+                    modelUsed = llmProvider.getDefaultModel();
+                    request.setModel(modelUsed);
+                    step.setProviderId(provider != null ? provider.getId() : null);
+                    step.setModelUsed(modelUsed);
+                    response = llmProvider.chat(request);
+                }
+            }
+
             step.setPromptTokens(response.getPromptTokens());
             step.setCompletionTokens(response.getCompletionTokens());
             step.setTotalTokens(response.getTotalTokens());
@@ -206,10 +219,20 @@ public class AgentRuntimeService {
         if (agent == null) return null;
         UUID providerId = agent.getDefaultProviderId();
         if (providerId != null) {
-            return providerRepository.findById(providerId).orElse(null);
+            Provider p = providerRepository.findById(providerId).orElse(null);
+            if (p != null) {
+                log.info("Resolved default provider {} for agent {}", p.getProviderType(), agent.getName());
+            }
+            return p;
         }
         List<Provider> providers = providerRepository.findByStatus("CONNECTED");
-        return providers.isEmpty() ? null : providers.get(0);
+        if (!providers.isEmpty()) {
+            Provider p = providers.get(0);
+            log.info("No default provider found for agent {}, using first connected provider {}", agent.getName(), p.getProviderType());
+            return p;
+        }
+        log.warn("No providers found for agent {}", agent.getName());
+        return null;
     }
 
     private LLMProvider resolveLLMProvider(Provider provider) {

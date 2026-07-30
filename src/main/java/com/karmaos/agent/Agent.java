@@ -35,6 +35,9 @@ public class Agent extends BaseEntity {
     @Column(name = "default_provider_id")
     private UUID defaultProviderId;
 
+    @Column(name = "fallback_provider_id")
+    private UUID fallbackProviderId;
+
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String configuration = "{}";
 }

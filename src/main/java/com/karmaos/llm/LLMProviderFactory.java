@@ -46,6 +46,7 @@ public class LLMProviderFactory {
             case "gemini"      -> new GeminiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "openrouter"  -> new OpenRouterProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "opencode"    -> new OpenCodeProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper, apiEndpoint);
+            case "groq"        -> new GroqProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             default -> throw new IllegalArgumentException("Unsupported provider type: " + providerType);
         };
     }

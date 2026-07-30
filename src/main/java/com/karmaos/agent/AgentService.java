@@ -40,6 +40,7 @@ public class AgentService {
         agent.setIcon(request.getIcon());
         agent.setDefaultPromptId(request.getDefaultPromptId());
         agent.setDefaultProviderId(request.getDefaultProviderId());
+        agent.setFallbackProviderId(request.getFallbackProviderId());
         agent = agentRepository.save(agent);
         return toResponse(agent);
     }
@@ -54,6 +55,7 @@ public class AgentService {
         agent.setIcon(request.getIcon());
         agent.setDefaultPromptId(request.getDefaultPromptId());
         agent.setDefaultProviderId(request.getDefaultProviderId());
+        agent.setFallbackProviderId(request.getFallbackProviderId());
         agent = agentRepository.save(agent);
         return toResponse(agent);
     }
@@ -76,6 +78,7 @@ public class AgentService {
                 .status(a.getStatus())
                 .defaultPromptId(a.getDefaultPromptId())
                 .defaultProviderId(a.getDefaultProviderId())
+                .fallbackProviderId(a.getFallbackProviderId())
                 .createdAt(a.getCreatedAt())
                 .updatedAt(a.getUpdatedAt())
                 .build();

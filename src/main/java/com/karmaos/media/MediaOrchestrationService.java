@@ -28,11 +28,11 @@ public class MediaOrchestrationService {
     private static final Logger log = LoggerFactory.getLogger(MediaOrchestrationService.class);
 
     private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("openai", "google", "gemini", "stability");
-    private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("openai", "google", "gemini", "elevenlabs");
+    private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("openai", "google", "gemini", "elevenlabs", "edge-tts", "edge");
     private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("ffmpeg");
     private static final Map<String, String> CAPABILITY_PROVIDER_MAP = Map.of(
         "image_generation", "openai",
-        "audio_generation", "openai"
+        "audio_generation", "edge-tts"
     );
 
     private final ImageProviderFactory imageProviderFactory;

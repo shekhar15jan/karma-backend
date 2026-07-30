@@ -15,9 +15,11 @@ import java.util.Map;
 public class VoiceController {
 
     private final VoiceService voiceService;
+    private final VoiceChatService voiceChatService;
 
-    public VoiceController(VoiceService voiceService) {
+    public VoiceController(VoiceService voiceService, VoiceChatService voiceChatService) {
         this.voiceService = voiceService;
+        this.voiceChatService = voiceChatService;
     }
 
     @PostMapping("/command")
@@ -25,5 +27,12 @@ public class VoiceController {
             @RequestBody Map<String, Object> request) {
         String text = (String) request.getOrDefault("text", "");
         return ResponseEntity.ok(ApiResponse.ok(voiceService.processCommand(text)));
+    }
+
+    @PostMapping("/chat")
+    public ResponseEntity<ApiResponse<VoiceChatResponse>> chat(
+            @RequestBody VoiceChatRequest request) {
+        VoiceChatResponse response = voiceChatService.chat(request);
+        return ResponseEntity.ok(ApiResponse.ok(response));
     }
 }

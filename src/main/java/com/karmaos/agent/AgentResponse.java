@@ -22,6 +22,7 @@ public class AgentResponse {
     private String status;
     private UUID defaultPromptId;
     private UUID defaultProviderId;
+    private UUID fallbackProviderId;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

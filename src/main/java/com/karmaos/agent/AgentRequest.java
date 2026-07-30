@@ -26,5 +26,6 @@ public class AgentRequest {
     private String icon;
     private UUID defaultPromptId;
     private UUID defaultProviderId;
+    private UUID fallbackProviderId;
     private Object configuration;
 }

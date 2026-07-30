@@ -32,6 +32,7 @@ public class VoiceProviderFactory {
             case "elevenlabs" -> new ElevenLabsProvider(apiKey, webClientBuilder);
             case "openai" -> new OpenAIVoiceProvider(apiKey, webClientBuilder);
             case "google", "gemini" -> new GoogleVoiceProvider(apiKey, webClientBuilder);
+            case "edge-tts", "edge" -> new EdgeTtsProvider();
             default -> {
                 log.warn("Unsupported voice provider type: {}, using mock", providerType);
                 yield getFallbackProvider();

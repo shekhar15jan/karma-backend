@@ -13,20 +13,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
-/**
- * OpenCode provider — connects to your locally-running OpenCode instance.
- * OpenCode exposes an OpenAI-compatible API endpoint that lets you use
- * any model configured in your opencode.json (Claude, GPT, Gemini, etc.)
- * through a local proxy on http://localhost:29763
- *
- * API key: use your OpenCode session token or leave blank if no auth is configured.
- * Base URL: configurable via api_endpoint, defaults to http://localhost:29763/v1
- */
 public class OpenCodeProvider implements LLMProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenCodeProvider.class);
 
-    private static final String DEFAULT_BASE_URL = "http://localhost:29763/v1/chat/completions";
+    private static final String DEFAULT_BASE_URL = "https://opencode.ai/zen/v1/chat/completions";
 
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
@@ -46,18 +37,18 @@ public class OpenCodeProvider implements LLMProvider {
     public String getName() { return "opencode"; }
 
     @Override
-    public String getDefaultModel() { return "claude-sonnet-4-5"; }
+    public String getDefaultModel() { return "deepseek-v4-flash-free"; }
 
     @Override
     public List<String> getAvailableModels() {
-        // Models available depend on your opencode.json configuration
         return List.of(
-            "claude-sonnet-4-5",
-            "claude-opus-4-5",
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gemini-2.0-flash",
-            "gemini-1.5-pro"
+            "deepseek-v4-flash-free",
+            "big-pickle",
+            "mimo-v2.5-free",
+            "laguna-s-2.1-free",
+            "ling-3.0-flash-free",
+            "north-mini-code-free",
+            "nemotron-3-ultra-free"
         );
     }
 
@@ -89,7 +80,6 @@ public class OpenCodeProvider implements LLMProvider {
                 .uri(baseUrl)
                 .contentType(MediaType.APPLICATION_JSON);
 
-            // Include API key only if provided
             if (apiKey != null && !apiKey.isBlank()) {
                 requestSpec = requestSpec.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
             }
