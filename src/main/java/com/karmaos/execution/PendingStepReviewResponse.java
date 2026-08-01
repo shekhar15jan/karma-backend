@@ -29,5 +29,6 @@ public class PendingStepReviewResponse {
     private String inputData;
     private String outputData;
     private int retryCount;
+    private int maxRetries;
     private LocalDateTime createdAt;
 }

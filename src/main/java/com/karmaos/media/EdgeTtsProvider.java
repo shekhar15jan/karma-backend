@@ -70,13 +70,25 @@ public class EdgeTtsProvider implements VoiceProvider {
 
             tempFile = Files.createTempFile("edge_tts_", ".mp3");
 
-            ProcessBuilder pb = new ProcessBuilder(
-                EDGE_TTS_CMD, EDGE_TTS_MODULE, EDGE_TTS_MODULE_NAME,
-                "--voice", voice,
-                "--text", text,
-                "--rate", rate,
-                "--write-media", tempFile.toAbsolutePath().toString()
-            );
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            ProcessBuilder pb;
+            if (isWindows) {
+                pb = new ProcessBuilder(
+                    "cmd.exe", "/c", "python", "-m", "edge_tts",
+                    "--voice", voice,
+                    "--text", text,
+                    "--rate", rate,
+                    "--write-media", tempFile.toAbsolutePath().toString()
+                );
+            } else {
+                pb = new ProcessBuilder(
+                    "python3", "-m", "edge_tts",
+                    "--voice", voice,
+                    "--text", text,
+                    "--rate", rate,
+                    "--write-media", tempFile.toAbsolutePath().toString()
+                );
+            }
 
             pb.redirectErrorStream(true);
             Process process = pb.start();

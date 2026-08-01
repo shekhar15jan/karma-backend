@@ -13,6 +13,8 @@ import com.karmaos.junction.MissionFlowRepository;
 import com.karmaos.media.MediaOrchestrationService;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
+import com.karmaos.publication.Publication;
+import com.karmaos.publishing.PublishingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -45,6 +47,8 @@ public class ExecutionOrchestrator {
     private final AgentRuntimeService agentRuntimeService;
     private final MediaOrchestrationService mediaOrchestrationService;
     private final ArtifactRepository artifactRepository;
+    private final PublishingService publishingService;
+    private final com.karmaos.sse.SseController sseController;
     private final ObjectMapper objectMapper;
 
     private final Map<UUID, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
@@ -60,6 +64,8 @@ public class ExecutionOrchestrator {
                                  AgentRuntimeService agentRuntimeService,
                                  MediaOrchestrationService mediaOrchestrationService,
                                  ArtifactRepository artifactRepository,
+                                 PublishingService publishingService,
+                                 com.karmaos.sse.SseController sseController,
                                  ObjectMapper objectMapper) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
@@ -71,6 +77,8 @@ public class ExecutionOrchestrator {
         this.agentRuntimeService = agentRuntimeService;
         this.mediaOrchestrationService = mediaOrchestrationService;
         this.artifactRepository = artifactRepository;
+        this.publishingService = publishingService;
+        this.sseController = sseController;
         this.objectMapper = objectMapper;
     }
 
@@ -143,6 +151,8 @@ public class ExecutionOrchestrator {
                 }
                 executionRepository.findById(executionId)
                         .ifPresent(ex -> updateMissionStatus(ex.getMissionId(), "FAILED"));
+                emitExecutionEvent(executionId, "execution.failed",
+                    "{\"executionId\":\"" + executionId + "\",\"status\":\"FAILED\"}");
             }
         }, executor);
         activeExecutions.put(executionId, future);
@@ -152,6 +162,8 @@ public class ExecutionOrchestrator {
         Execution execution = executionRepository.findById(executionId)
             .orElseThrow(() -> new RuntimeException("Execution not found: " + executionId));
         executionService.start(executionId);
+        emitExecutionEvent(executionId, "execution.started",
+            "{\"executionId\":\"" + executionId + "\",\"status\":\"RUNNING\"}");
         runFrom(execution);
     }
 
@@ -163,6 +175,8 @@ public class ExecutionOrchestrator {
         }
         executionService.start(executionId);
         updateMissionStatus(execution.getMissionId(), "RUNNING");
+        emitExecutionEvent(executionId, "execution.resumed",
+            "{\"executionId\":\"" + executionId + "\",\"status\":\"RUNNING\"}");
         runAsync(executionId, () -> runFrom(execution));
     }
 
@@ -273,6 +287,30 @@ public class ExecutionOrchestrator {
 
     public void onArtifactApproved(UUID artifactId) {
         log.info("Artifact {} approved for publishing", artifactId);
+        // Publish after the surrounding transaction (ArtifactService.updateReviewStatus) commits.
+        // IMPORTANT: run on the executor, NOT inline in afterCommit. Running a @Transactional method
+        // directly inside afterCommit joins the (already-committed) surrounding transaction and its
+        // writes are never committed. A fresh thread starts its own transaction that commits normally.
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    executor.submit(() -> publishApprovedArtifact(artifactId));
+                }
+            });
+        } else {
+            executor.submit(() -> publishApprovedArtifact(artifactId));
+        }
+    }
+
+    private void publishApprovedArtifact(UUID artifactId) {
+        try {
+            List<Publication> publications = publishingService.publishArtifact(artifactId);
+            long published = publications.stream().filter(p -> "COMPLETED".equals(p.getStatus())).count();
+            log.info("Artifact {} published to {}/{} channels", artifactId, published, publications.size());
+        } catch (Exception e) {
+            log.error("Failed to publish approved artifact {}", artifactId, e);
+        }
     }
 
     public void onArtifactRejected(UUID artifactId, String feedback) {
@@ -324,6 +362,9 @@ public class ExecutionOrchestrator {
                 previousOutput = step.getOutputData();
                 updateMissionProgress(missionId,
                         totalSteps > 0 ? (int) Math.round(((i + 1) * 100.0) / totalSteps) : 100);
+                emitExecutionEvent(executionId, "step.completed",
+                    "{\"executionId\":\"" + executionId + "\",\"stepOrder\":" + i
+                        + ",\"status\":\"COMPLETED\",\"stepId\":\"" + step.getId() + "\"}");
 
                 if (MODE_REVIEW.equals(mode)) {
                     step.setReviewStatus("PENDING_REVIEW");
@@ -333,6 +374,8 @@ public class ExecutionOrchestrator {
                     saveMeta(execution, meta);
                     executionService.pause(executionId);
                     updateMissionStatus(missionId, "WAITING");
+                    emitExecutionEvent(executionId, "execution.waiting",
+                        "{\"executionId\":\"" + executionId + "\",\"status\":\"WAITING\",\"stepOrder\":" + i + "}");
                     log.info("Execution {} paused at step index {} awaiting review", executionId, i);
                     return;
                 }
@@ -341,10 +384,14 @@ public class ExecutionOrchestrator {
             createArtifactsFromOutput(execution, missionFlows, previousOutput, holder.mediaFlows);
             executionService.complete(executionId, "COMPLETED", null);
             updateMissionStatus(missionId, "COMPLETED");
+            emitExecutionEvent(executionId, "execution.completed",
+                "{\"executionId\":\"" + executionId + "\",\"status\":\"COMPLETED\"}");
         } catch (Exception e) {
             log.error("Execution {} failed with exception", executionId, e);
             executionService.complete(executionId, "FAILED", e.getMessage());
             updateMissionStatus(missionId, "FAILED");
+            emitExecutionEvent(executionId, "execution.failed",
+                "{\"executionId\":\"" + executionId + "\",\"status\":\"FAILED\"}");
         }
     }
 
@@ -471,6 +518,8 @@ public class ExecutionOrchestrator {
             activeExecutions.remove(executionId);
         }
         executionService.complete(executionId, "CANCELLED", "Execution cancelled by user");
+        emitExecutionEvent(executionId, "execution.cancelled",
+            "{\"executionId\":\"" + executionId + "\",\"status\":\"CANCELLED\"}");
         Execution execution = executionRepository.findById(executionId).orElse(null);
         if (execution != null) {
             updateMissionStatus(execution.getMissionId(), "CANCELLED");
@@ -498,7 +547,21 @@ public class ExecutionOrchestrator {
                 mission.setProgress(100);
             }
             missionRepository.save(mission);
+            emitMissionEvent(missionId, status);
         });
+    }
+
+    private void emitExecutionEvent(UUID executionId, String eventType, String data) {
+        try {
+            sseController.sendEvent(eventType, data);
+        } catch (Exception e) {
+            log.debug("SSE emit failed for {} {}: {}", eventType, executionId, e.getMessage());
+        }
+    }
+
+    private void emitMissionEvent(UUID missionId, String status) {
+        emitExecutionEvent(missionId, "mission." + status.toLowerCase(),
+            "{\"missionId\":\"" + missionId + "\",\"status\":\"" + status + "\"}");
     }
 
     private void updateMissionProgress(UUID missionId, int progress) {

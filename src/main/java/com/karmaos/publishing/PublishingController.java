@@ -11,6 +11,8 @@ import com.karmaos.common.ApiResponse;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
+import com.karmaos.publication.Publication;
+import com.karmaos.publication.PublicationRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -23,11 +25,13 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping(ApiConstants.API_V1 + "/publishing")
@@ -36,17 +40,20 @@ public class PublishingController {
     private final ArtifactRepository artifactRepository;
     private final ProviderRepository providerRepository;
     private final ProviderKeyCipher providerKeyCipher;
+    private final PublicationRepository publicationRepository;
     private final ObjectMapper objectMapper;
     private final OwnershipService ownershipService;
 
     public PublishingController(ArtifactRepository artifactRepository,
                                 ProviderRepository providerRepository,
                                 ProviderKeyCipher providerKeyCipher,
+                                PublicationRepository publicationRepository,
                                 ObjectMapper objectMapper,
                                 OwnershipService ownershipService) {
         this.artifactRepository = artifactRepository;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
+        this.publicationRepository = publicationRepository;
         this.objectMapper = objectMapper;
         this.ownershipService = ownershipService;
     }
@@ -173,22 +180,47 @@ public class PublishingController {
     public ResponseEntity<ApiResponse<List<Map<String, Object>>>> logs(
             @AuthenticationPrincipal UserPrincipal user) {
         List<UUID> missionIds = ownershipService.getOwnedMissionIds(user.getId());
-        List<Artifact> published = missionIds.isEmpty()
+        List<Artifact> artifacts = missionIds.isEmpty()
                 ? List.of()
-                : artifactRepository.findByPublicationStatus("PUBLISHED").stream()
-                        .filter(a -> missionIds.contains(a.getMissionId()))
-                        .toList();
-        var logs = published.stream()
-                .map(a -> Map.<String, Object>of(
-                        "id", a.getId().toString(),
-                        "title", a.getName(),
-                        "platform", "youtube",
-                        "status", "completed",
-                        "publishedAt", a.getUpdatedAt() != null ? a.getUpdatedAt().toString() : null,
-                        "views", 0
-                ))
-                .toList();
+                : artifactRepository.findByMissionIdInOrderByCreatedAtDesc(missionIds);
+        if (artifacts.isEmpty()) {
+            return ResponseEntity.ok(ApiResponse.ok(List.of()));
+        }
+        Map<UUID, Artifact> artifactById = artifacts.stream()
+                .collect(Collectors.toMap(Artifact::getId, a -> a, (a, b) -> a));
+        List<Publication> publications = publicationRepository
+                .findByArtifactIdInOrderByCreatedAtDesc(artifactById.keySet());
+
+        List<Map<String, Object>> logs = new ArrayList<>();
+        for (Publication pub : publications) {
+            Artifact a = artifactById.get(pub.getArtifactId());
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("id", pub.getId().toString());
+            entry.put("title", a != null && a.getName() != null ? a.getName() : "Artifact");
+            entry.put("platform", pub.getDestination());
+            entry.put("status", mapLogStatus(pub.getStatus()));
+            entry.put("published_at", pub.getPublishedAt() != null
+                    ? pub.getPublishedAt().toString()
+                    : (pub.getCreatedAt() != null ? pub.getCreatedAt().toString() : null));
+            entry.put("views", 0);
+            if (pub.getUrl() != null) {
+                entry.put("url", pub.getUrl());
+            }
+            if (pub.getErrorMessage() != null) {
+                entry.put("error", pub.getErrorMessage());
+            }
+            logs.add(entry);
+        }
         return ResponseEntity.ok(ApiResponse.ok(logs));
+    }
+
+    private String mapLogStatus(String status) {
+        if (status == null) return "pending";
+        return switch (status) {
+            case "COMPLETED", "PUBLISHED" -> "completed";
+            case "FAILED" -> "failed";
+            default -> "pending";
+        };
     }
 
     private Map<String, Object> toChannel(Provider p) {

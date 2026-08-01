@@ -124,6 +124,7 @@ public class ExecutionService {
                 .inputData(s.getInputData())
                 .outputData(s.getOutputData())
                 .retryCount(s.getRetryCount())
+                .maxRetries(ExecutionOrchestrator.MAX_STEP_RETRIES)
                 .createdAt(s.getCreatedAt())
                 .build();
     }

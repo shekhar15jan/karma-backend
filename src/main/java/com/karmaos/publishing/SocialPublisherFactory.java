@@ -25,6 +25,27 @@ public class SocialPublisherFactory {
         return publisherCache.computeIfAbsent(key, k -> createPublisher(platform, apiKey, accessToken));
     }
 
+    /**
+     * Returns a publisher for a connected PUBLISHING channel. Custom channels (any platform
+     * other than youtube) with an HTTP endpoint get a {@link WebhookPublisher}; youtube uses
+     * the real YouTube publisher; anything without usable config falls back to mock.
+     */
+    public SocialPublisher getPublisherForChannel(String platform, String endpoint, String authToken, String contentFormat) {
+        String key = "ch:" + (platform != null ? platform.toLowerCase() : "") + ":" + (endpoint != null ? endpoint.hashCode() : "0")
+                + ":" + (authToken != null ? authToken.hashCode() : "0") + ":" + (contentFormat != null ? contentFormat.hashCode() : "0");
+        return publisherCache.computeIfAbsent(key, k -> {
+            String p = platform != null ? platform.toLowerCase() : "";
+            if ("youtube".equals(p)) {
+                return new YouTubePublisher(authToken, authToken, webClientBuilder);
+            }
+            if (endpoint != null && !endpoint.isBlank()) {
+                return new WebhookPublisher(p.isBlank() ? "custom" : p, endpoint, authToken, contentFormat, webClientBuilder);
+            }
+            log.warn("Publishing channel {} has no endpoint, using mock", p);
+            return getFallbackPublisher();
+        });
+    }
+
     private SocialPublisher createPublisher(String platform, String apiKey, String accessToken) {
         if (platform == null) return getFallbackPublisher();
         return switch (platform.toLowerCase()) {

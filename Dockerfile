@@ -10,7 +10,8 @@ RUN mvn package -DskipTests -B
 
 FROM amazoncorretto:21-alpine AS runner
 
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl python3 py3-pip
+RUN pip3 install --break-system-packages edge-tts || pip3 install edge-tts
 
 WORKDIR /app
 
