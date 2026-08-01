@@ -29,7 +29,7 @@ public class User extends BaseEntity {
     private String displayName;
 
     @Column(length = 50)
-    private String role = "USER";
+    private String role = "OPERATOR";
 
     @Column(name = "avatar_url", length = 512)
     private String avatarUrl;
@@ -48,6 +48,6 @@ public class User extends BaseEntity {
         this.email = email;
         this.password = password;
         this.displayName = displayName;
-        this.role = "USER";
+        this.role = "OPERATOR";
     }
 }

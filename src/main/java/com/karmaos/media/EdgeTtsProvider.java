@@ -90,6 +90,8 @@ public class EdgeTtsProvider implements VoiceProvider {
                 );
             }
 
+            log.info("Executing Edge TTS command: {}", String.join(" ", pb.command()));
+
             pb.redirectErrorStream(true);
             Process process = pb.start();
 

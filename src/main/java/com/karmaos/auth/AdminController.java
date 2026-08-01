@@ -32,7 +32,7 @@ public class AdminController {
                     entry.put("id", u.getId().toString());
                     entry.put("email", u.getEmail());
                     entry.put("displayName", u.getDisplayName());
-                    entry.put("role", u.getRole() != null ? u.getRole() : "USER");
+                    entry.put("role", u.getRole() != null ? u.getRole() : "OPERATOR");
                     entry.put("isActive", u.getDeletedAt() == null);
                     entry.put("lastLoginAt", u.getLastLoginAt() != null ? u.getLastLoginAt().toString() : null);
                     return entry;
@@ -54,19 +54,9 @@ public class AdminController {
                 Map.of(
                         "id", "role-operator",
                         "name", "OPERATOR",
-                        "description", "Run missions, review artifacts and manage publishing",
-                        "permissions", List.of("workflows:read", "workflows:execute",
-                                "providers:read", "analytics:read")),
-                Map.of(
-                        "id", "role-reviewer",
-                        "name", "REVIEWER",
-                        "description", "Approve or reject generated artifacts before publishing",
-                        "permissions", List.of("workflows:read", "analytics:read")),
-                Map.of(
-                        "id", "role-user",
-                        "name", "USER",
-                        "description", "Standard user with read access",
-                        "permissions", List.of("workflows:read"))
+                        "description", "Privileged access to run the content pipeline: workspaces, projects, missions, executions, reviews, artifacts, knowledge, publishing. Cannot configure AI infrastructure (agents, providers, flows designer, prompts, channels, users/settings).",
+                        "permissions", List.of("workflows:read", "workflows:write", "workflows:execute",
+                                "providers:read", "analytics:read"))
         );
         return ResponseEntity.ok(ApiResponse.ok(roles));
     }

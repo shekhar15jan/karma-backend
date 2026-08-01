@@ -13,13 +13,18 @@ import com.karmaos.llm.LLMProvider;
 import com.karmaos.llm.LLMProviderFactory;
 import com.karmaos.llm.LLMRequest;
 import com.karmaos.llm.LLMResponse;
+import com.karmaos.memory.KarmaMemoryService;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
+import com.karmaos.project.Project;
+import com.karmaos.project.ProjectRepository;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
 import com.karmaos.report.ReportService;
 import com.karmaos.system.SystemInfoService;
+import com.karmaos.workspace.Workspace;
+import com.karmaos.workspace.WorkspaceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -48,13 +53,18 @@ public class VoiceChatService {
     private final ObjectMapper objectMapper;
     private final KarmaDocService karmaDocService;
     private final OwnershipService ownershipService;
+    private final WorkspaceRepository workspaceRepository;
+    private final ProjectRepository projectRepository;
+    private final KarmaMemoryService karmaMemoryService;
 
     public VoiceChatService(AgentService agentService, ProviderRepository providerRepository,
                             ProviderKeyCipher providerKeyCipher,
                             ReportService reportService, MissionRepository missionRepository,
                             ExecutionRepository executionRepository, SystemInfoService systemInfoService,
                             LLMProviderFactory llmProviderFactory, ObjectMapper objectMapper,
-                            KarmaDocService karmaDocService, OwnershipService ownershipService) {
+                            KarmaDocService karmaDocService, OwnershipService ownershipService,
+                            WorkspaceRepository workspaceRepository, ProjectRepository projectRepository,
+                            KarmaMemoryService karmaMemoryService) {
         this.agentService = agentService;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -66,9 +76,12 @@ public class VoiceChatService {
         this.objectMapper = objectMapper;
         this.karmaDocService = karmaDocService;
         this.ownershipService = ownershipService;
+        this.workspaceRepository = workspaceRepository;
+        this.projectRepository = projectRepository;
+        this.karmaMemoryService = karmaMemoryService;
     }
 
-    public VoiceChatResponse chat(VoiceChatRequest request, UUID userId) {
+    public VoiceChatResponse chat(VoiceChatRequest request, UUID userId, String role) {
         String text = request.getText() != null ? request.getText().trim().toLowerCase() : "";
         if (text.isEmpty()) {
             return VoiceChatResponse.staticReply("I didn't catch that. Could you please repeat?", "chat", "");
@@ -84,7 +97,7 @@ public class VoiceChatService {
             return staticMatch;
         }
 
-        return callLlm(request, userId);
+        return callLlm(request, userId, role);
     }
 
     // ========== LANGUAGE SWITCH (intent "language" + target code) ==========
@@ -323,14 +336,15 @@ public class VoiceChatService {
 
     // ========== LLM FALLBACK (for dynamic system queries) ==========
 
-    private VoiceChatResponse callLlm(VoiceChatRequest request, UUID userId) {
+    private VoiceChatResponse callLlm(VoiceChatRequest request, UUID userId, String role) {
         try {
             String language = detectLanguage(request);
-            String systemPrompt = buildSystemPrompt(request, language, userId);
-            LLMRequest llmRequest = new LLMRequest(systemPrompt, request.getText());
+            String systemPrompt = buildSystemPrompt(request, language, userId, role);
+            LLMRequest llmRequest = new LLMRequest(systemPrompt, null);
             llmRequest.setModel(LLM_MODEL);
             llmRequest.setTemperature(0.5);
             llmRequest.setMaxTokens(1200);
+            llmRequest.setMessages(buildHistoryMessages(request));
 
             LLMProvider llmProvider = resolveLlmProvider();
             if (llmProvider == null) {
@@ -354,6 +368,34 @@ public class VoiceChatService {
         }
     }
 
+    private List<Map<String, String>> buildHistoryMessages(VoiceChatRequest request) {
+        List<Map<String, String>> messages = new java.util.ArrayList<>();
+        List<Map<String, String>> history = request.getHistory();
+        if (history != null) {
+            for (Map<String, String> entry : history) {
+                if (entry == null) continue;
+                String role = entry.get("role");
+                String content = entry.get("content");
+                if (content == null || content.isBlank()) continue;
+                String llmRole;
+                if ("assistant".equalsIgnoreCase(role)) {
+                    llmRole = "assistant";
+                } else {
+                    llmRole = "user";
+                }
+                messages.add(Map.of("role", llmRole, "content", content));
+            }
+        }
+        if (request.getText() != null && !request.getText().isBlank()) {
+            messages.add(Map.of("role", "user", "content", request.getText()));
+        }
+        int max = 20;
+        if (messages.size() > max) {
+            return messages.subList(messages.size() - max, messages.size());
+        }
+        return messages;
+    }
+
     private LLMProvider resolveLlmProvider() {
         List<Provider> connected = providerRepository.findByStatus("CONNECTED").stream()
                 .filter(p -> p.getDeletedAt() == null)
@@ -372,7 +414,7 @@ public class VoiceChatService {
         return null;
     }
 
-    private String buildSystemPrompt(VoiceChatRequest request, String language, UUID userId) {
+    private String buildSystemPrompt(VoiceChatRequest request, String language, UUID userId, String role) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are Karma AI — the master intelligence and guide for the entire KARMA OS platform. ");
         sb.append("You have complete knowledge of the system's architecture, all its agents, providers, skills, flows, and documentation. ");
@@ -399,12 +441,30 @@ public class VoiceChatService {
             sb.append("Black Book: unavailable\n");
         }
 
-        sb.append("ON-DEMAND DOCUMENTS:\n");
+        sb.append("KNOWLEDGE POLICY:\n");
+        sb.append("The SYSTEM KNOWLEDGE above (the Black Book) is your ONLY knowledge source for KARMA OS. ");
+        sb.append("There are no other on-demand documents to fetch — the /docs files are internal development artifacts and you must NOT reference, list, fetch, or paste them. ");
+        sb.append("Never use intent \"doc\". Answer everything about KARMA OS from the Black Book above.\n\n");
+        sb.append("ACTION-ORIENTED MINDSET: You are the operator of KARMA OS. When the user asks you to do something in the system, DO it through the UI action contract — do not decline, do not just describe it, and do not restate limitations. Open the right screen or modal, pre-fill the form, and tell the user what to confirm in the UI. Use the live system state above to pick the correct workspace, project, provider, and run mode.\n\n");
+
+        sb.append("OPERATOR ROLE: The signed-in user has role \"").append(role).append("\". Only two roles exist: ADMIN and OPERATOR. Respect role boundaries: do NOT emit or offer actions the role cannot perform, and never suggest bypassing permissions. If the user asks for something outside their role, explain briefly what their role can do and, when possible, offer the closest permitted action or navigate them to the relevant screen.\n");
+        sb.append("Role boundaries (verb → allowed roles):\n");
+        sb.append("  ADMIN: ALL actions — everything below, plus create_agent, provider connect/test/edit, publishing channel config, flows designer edits, prompts/skills management, user/role/settings administration.\n");
+        sb.append("  OPERATOR: privileged access to the content pipeline only — navigate, open_modal, prefill_mission, create_workspace, create_project, create_mission, trigger_mission, set_run_mode, approve_artifact, reject_artifact, and publish content. Operators may VIEW agents, providers, flows, prompts, and channels read-only but must NOT create/edit/delete agents, connect/test/edit providers, edit flows, manage prompts/skills/channels, or touch user/role/settings.\n");
+        sb.append("  Neither role: nothing beyond these. If an OPERATOR asks for an ADMIN-only action (e.g. create_agent, connect a provider), do not emit it — explain it is admin-only and offer the closest permitted alternative or navigation.\n\n");
+
+        sb.append("LEARNED MEMORY (auto-curated per user; personalization, not authority):\n");
         try {
-            sb.append(karmaDocService.listAvailableDocuments()).append("\n");
+            String memoryBlock = karmaMemoryService.buildMemoryPromptBlock(userId);
+            if (!memoryBlock.isBlank()) {
+                sb.append(memoryBlock);
+            } else {
+                sb.append("No learned memory yet for this user.\n\n");
+            }
         } catch (Exception e) {
-            sb.append("Document catalog: unavailable\n");
+            sb.append("No learned memory available.\n\n");
         }
+        sb.append("Memory rules: these are hints from past conversations/actions to personalize the experience. If the user's NEW instruction contradicts a learned memory, the new instruction wins. Do not treat learned memory as a role or permission grant.\n\n");
 
         sb.append("CURRENT SYSTEM STATE:\n");
 
@@ -434,11 +494,31 @@ public class VoiceChatService {
             } else {
                 sb.append("- Connected Providers:\n");
                 for (Provider p : providers) {
-                    sb.append("  * ").append(p.getName()).append(" (").append(p.getProviderType()).append(")\n");
+                    sb.append("  * ").append(p.getName()).append(" (id=").append(p.getId())
+                      .append(", type=").append(p.getProviderType()).append(")\n");
                 }
             }
         } catch (Exception e) {
             sb.append("- Connected Providers: unavailable\n");
+        }
+
+        // Workspaces and projects (owned, with IDs)
+        try {
+            List<Workspace> workspaces = workspaceRepository.findByOwnerIdAndStatus(userId, "ACTIVE");
+            if (workspaces.isEmpty()) {
+                sb.append("- Workspaces: none (the user must create one first)\n");
+            } else {
+                sb.append("- Workspaces:\n");
+                for (Workspace w : workspaces) {
+                    sb.append("  * ").append(w.getName()).append(" (id=").append(w.getId()).append(")\n");
+                    List<Project> projects = projectRepository.findByWorkspaceIdAndStatus(w.getId(), "ACTIVE");
+                    for (Project p : projects) {
+                        sb.append("      - Project: ").append(p.getName()).append(" (id=").append(p.getId()).append(")\n");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            sb.append("- Workspaces: unavailable\n");
         }
 
         // System health
@@ -475,7 +555,9 @@ public class VoiceChatService {
             if (!recentMissions.isEmpty()) {
                 sb.append("- Recent Missions:\n");
                 for (Mission m : recentMissions) {
-                    sb.append("  * ").append(m.getName()).append(" (").append(m.getStatus()).append(")\n");
+                    sb.append("  * ").append(m.getName()).append(" (id=").append(m.getId())
+                      .append(", status=").append(m.getStatus()).append(", type=")
+                      .append(m.getMissionType()).append(")\n");
                 }
             }
         } catch (Exception e) {
@@ -484,17 +566,37 @@ public class VoiceChatService {
 
         sb.append("\nCurrent Page: ").append(request.getCurrentPage() != null ? request.getCurrentPage() : "unknown").append("\n\n");
 
-        sb.append("\nYou are the authority on KARMA OS — the Black Book above is the single source of truth and is accurate; ");
-        sb.append("the on-demand documents are raw development specs that may be outdated, so if they conflict with the Black Book, trust the Black Book. ");
-        sb.append("Use it to answer questions about system architecture, agents, providers, execution, configuration, and any other topic users ask about.\n\n");
+        sb.append("\nYou are the authority on KARMA OS — the Black Book above is the single source of truth and is accurate. ");
+        sb.append("Use it to answer questions about system architecture, agents, providers, execution, configuration, security, performance, operations, and any other topic users ask about.\n\n");
         sb.append("When the user asks about current system state (agents, health, providers, missions), use the context above.\n");
         sb.append("When they want to navigate, respond with intent \"navigate\" and the target page name.\n");
         sb.append("When they ask about documentation or how something works, use your Black Book knowledge.\n");
-        sb.append("When they ask for a specific reference document listed under ON-DEMAND DOCUMENTS, respond with intent \"doc\" and target = the exact filename.\n");
+        sb.append("When they ask whether a feature works, answer confidently from the Black Book and, whenever the request maps to a UI action, carry it out via the action contract — do not refuse or dwell on limitations.\n");
         sb.append("When they ask a general question, respond conversationally with intent \"chat\".\n");
         sb.append("When they ask about system status, respond with intent \"query\".\n\n");
+
+        sb.append("WALKTHROUGH MODE (when the user asks to \"walk through the system\", \"tour\", \"guide me\", \"walk me through\", \"onboarding\"):\n");
+        sb.append("Use the operator sequence in the Black Book (Part A: log in, workspace, project, AI provider, first mission, REVIEW approval, final content, artifacts, publishing, voice/chat) as your script. Do NOT paste the file or quote large blocks. ");
+        sb.append("Lead them phase-by-phase conversationally, exactly in order. ");
+        sb.append("For each phase: explain in 2-3 short sentences what they should do and what they should see on screen, then STOP and ask them to tell you \"next\" when they are done. ");
+        sb.append("Before starting, quickly check the live context above (agents, connected providers, active missions) and adapt: if no AI provider is connected, warn them to fix that before running a real mission; if they already have a workspace, skip straight to the next missing step. ");
+        sb.append("Keep each phase short — this is a guided tour, not a document dump.\n\n");
         sb.append("Respond ONLY with valid JSON in this exact format:\n");
-        sb.append("{ \"reply\": \"your natural language response here\", \"intent\": \"navigate|chat|query|doc\", \"target\": \"page name or filename or empty\", \"language\": \"ISO code of the language used\" }\n");
+        sb.append("{ \"reply\": \"your natural language response here\", \"intent\": \"navigate|chat|query\", \"target\": \"page name or empty\", \"language\": \"ISO code of the language used\", \"action\": { \"type\": \"...\", \"params\": { ... } } }\n");
+        sb.append("ACTION CONTRACT: you OPERATE the KARMA OS UI for the user — like an operator clicking through the app. When the user asks you to DO something in KARMA OS (create a mission, run a mission, create a workspace/project, approve/reject, connect a provider, change run mode, open a screen), set the \"action\" object to the UI operation and set intent \"navigate\" with the target page when a screen change is needed. Supported action types:\n");
+        sb.append("  * \"open_modal\": params { \"modal\": \"create-mission|flows|providers|agents|approvals\" } — open that modal on the page.\n");
+        sb.append("  * \"prefill_mission\": params { \"workspaceId\", \"projectId\", \"name\", \"description\", \"missionType\", \"priority\", \"providerId\", \"runMode\": \"REVIEW|AUTO\" } — pre-fill the New Mission form (only include fields you know to be correct; omit unknown ids).\n");
+        sb.append("  * \"navigate\": params { \"page\": \"dashboard|mission-control|executions|reviews|publishing|workspaces|agents|providers|calendar|knowledge|prompts|flows|artifacts|analytics|settings\" } — go to that screen.\n");
+        sb.append("  * \"create_workspace\": params { \"name\", \"description\" } — actually create a workspace now. Use the name the user gave.\n");
+        sb.append("  * \"create_project\": params { \"workspaceId\", \"name\" } — actually create a project in that workspace (use an id from the live Workspaces list; omit if unknown).\n");
+        sb.append("  * \"create_mission\": params { \"projectId\", \"name\", \"description\", \"missionType\", \"priority\", \"providerId\" } — actually create the mission now (no form). Only emit if you have a valid projectId from the live state; otherwise use \"prefill_mission\".\n");
+        sb.append("  * \"trigger_mission\": params { \"missionId\", \"runMode\": \"REVIEW|AUTO\" } — start executing an existing mission now (use an id from Recent Missions; runMode defaults to the user's preference or REVIEW).\n");
+        sb.append("  * \"approve_artifact\": params { \"id\" } — approve a pending artifact review.\n");
+        sb.append("  * \"reject_artifact\": params { \"id\" } — reject a pending artifact review.\n");
+        sb.append("  * \"set_run_mode\": params { \"runMode\": \"REVIEW|AUTO\" } — change the run mode used when triggering missions.\n");
+        sb.append("  * \"create_agent\": params { \"name\", \"category\", \"description\" } — actually create an agent.\n");
+        sb.append("  * \"remember_memory\": params { \"key\", \"value\" } — store an explicit user preference/fact for future sessions (e.g. \"always use AUTO mode\", \"never do X\", \"I prefer Y\"). Emit ONLY when the user states a durable preference; do NOT emit for one-off facts, greetings, or questions. The saved memory is injected into future conversations for this user.\n");
+        sb.append("When emitting an action, your \"reply\" must briefly tell the user what you did or what you need from them (e.g. \"I have opened the New Mission form, please review and click Create & Run\" or \"Mission created and running in REVIEW mode\"). If the action requires user confirmation in the UI, say so. Prefer actually performing the action (create_workspace/create_project/create_mission/trigger_mission/approve_artifact/reject_artifact/set_run_mode/create_agent) whenever you have the required ids and values from the live state — only fall back to open_modal/prefill when you are missing something. When the user simply asks a question (no action needed), omit \"action\" entirely.\n");
         sb.append("RULES: the \"reply\" value must be plain conversational text on ONE line — no literal line breaks, no quotes, no embedded JSON inside it. ");
         sb.append("BE BRIEF: answer in ONE short sentence (under 25 words) whenever possible. ");
         sb.append("Only expand to 2-3 short sentences (max ~50 words) for genuinely technical or step-by-step questions. ");
@@ -517,6 +619,13 @@ public class VoiceChatService {
             String intent = node.has("intent") ? node.get("intent").asText() : "chat";
             String target = node.has("target") ? node.get("target").asText() : "";
             String language = node.has("language") ? node.get("language").asText() : fallbackLanguage;
+            Map<String, Object> action = node.has("action") && node.get("action").isObject()
+                    ? objectMapper.convertValue(node.get("action"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {})
+                    : null;
+            if ("doc".equalsIgnoreCase(intent)) {
+                intent = "chat";
+                target = "";
+            }
 
             for (int depth = 0; depth < 3; depth++) {
                 JsonNode inner = parseJsonObject(reply);
@@ -525,6 +634,9 @@ public class VoiceChatService {
                 if (inner.has("intent")) intent = inner.get("intent").asText();
                 if (inner.has("target")) target = inner.get("target").asText();
                 if (inner.has("language")) language = inner.get("language").asText();
+                if (inner.has("action") && inner.get("action").isObject()) {
+                    action = objectMapper.convertValue(inner.get("action"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                }
             }
 
             String trimmed = reply.trim();
@@ -543,7 +655,9 @@ public class VoiceChatService {
             if ("doc".equalsIgnoreCase(intent)) {
                 return withLanguage(withDocument(reply, target), language);
             }
-            return withLanguage(VoiceChatResponse.fromLlm(reply, intent, target), language);
+            VoiceChatResponse resp = withLanguage(VoiceChatResponse.fromLlm(reply, intent, target), language);
+            resp.setAction(action);
+            return resp;
         } catch (Exception e) {
             return withLanguage(VoiceChatResponse.fromLlm(cleanUp(content), "chat", ""), fallbackLanguage);
         }

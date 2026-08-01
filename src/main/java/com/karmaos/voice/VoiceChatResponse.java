@@ -1,11 +1,15 @@
 package com.karmaos.voice;
 
+import java.util.Map;
+
 public class VoiceChatResponse {
     private String reply;
     private String intent;
     private String target;
     private boolean fromLlm;
     private String language;
+    private String eventId;
+    private Map<String, Object> action;
 
     public VoiceChatResponse() {}
 
@@ -26,6 +30,10 @@ public class VoiceChatResponse {
     public void setFromLlm(boolean fromLlm) { this.fromLlm = fromLlm; }
     public String getLanguage() { return language; }
     public void setLanguage(String language) { this.language = language; }
+    public String getEventId() { return eventId; }
+    public void setEventId(String eventId) { this.eventId = eventId; }
+    public Map<String, Object> getAction() { return action; }
+    public void setAction(Map<String, Object> action) { this.action = action; }
 
     public static VoiceChatResponse fromLlm(String reply, String intent, String target) {
         return new VoiceChatResponse(reply, intent, target, true);

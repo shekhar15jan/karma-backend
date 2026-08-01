@@ -3,6 +3,7 @@ package com.karmaos.voice;
 import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
+import com.karmaos.memory.KarmaMemoryService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -15,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @RestController
 @RequestMapping(ApiConstants.VOICE)
@@ -23,12 +25,14 @@ public class VoiceController {
     private final VoiceService voiceService;
     private final VoiceChatService voiceChatService;
     private final VoiceTtsService voiceTtsService;
+    private final KarmaMemoryService karmaMemoryService;
 
     public VoiceController(VoiceService voiceService, VoiceChatService voiceChatService,
-                           VoiceTtsService voiceTtsService) {
+                           VoiceTtsService voiceTtsService, KarmaMemoryService karmaMemoryService) {
         this.voiceService = voiceService;
         this.voiceChatService = voiceChatService;
         this.voiceTtsService = voiceTtsService;
+        this.karmaMemoryService = karmaMemoryService;
     }
 
     @PostMapping("/command")
@@ -42,7 +46,26 @@ public class VoiceController {
     public ResponseEntity<ApiResponse<VoiceChatResponse>> chat(
             @RequestBody VoiceChatRequest request,
             @AuthenticationPrincipal UserPrincipal user) {
-        VoiceChatResponse response = voiceChatService.chat(request, user.getId());
+        String role = "OPERATOR";
+        if (user.getAuthorities() != null) {
+            for (var authority : user.getAuthorities()) {
+                String r = authority.getAuthority();
+                if (r != null && r.startsWith("ROLE_")) {
+                    role = r.substring(5);
+                    break;
+                }
+            }
+        }
+        VoiceChatResponse response = voiceChatService.chat(request, user.getId(), role);
+        UUID eventId = karmaMemoryService.recordInteraction(user.getId(), request.getText(), response,
+                request.getCurrentPage());
+        if (eventId != null) {
+            String eventIdStr = eventId.toString();
+            response.setEventId(eventIdStr);
+            if (response.getAction() != null) {
+                response.getAction().put("eventId", eventIdStr);
+            }
+        }
         return ResponseEntity.ok(ApiResponse.ok(response));
     }
 
