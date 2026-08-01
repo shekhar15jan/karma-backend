@@ -16,5 +16,9 @@ public interface FlowRepository extends JpaRepository<Flow, UUID> {
 
     Optional<Flow> findByIdAndStatus(UUID id, String status);
 
+    Optional<Flow> findByNameAndStatus(String name, String status);
+
     List<Flow> findByNameContainingIgnoreCase(String name);
+
+    List<Flow> findByNameContainingIgnoreCaseAndStatus(String name, String status);
 }

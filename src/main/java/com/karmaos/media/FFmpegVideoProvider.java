@@ -55,9 +55,17 @@ public class FFmpegVideoProvider implements VideoProvider {
             Path output = tempDir.resolve("output.mp4");
 
             List<Path> localImages = downloadImages(request.getImageUrls(), tempDir);
-            Path localAudio = request.getAudioUrl() != null
-                ? downloadFile(request.getAudioUrl(), tempDir, "audio")
-                : null;
+            if (localImages.isEmpty()) {
+                return VideoResponse.error("No usable images could be downloaded for video generation");
+            }
+            Path localAudio = null;
+            if (request.getAudioUrl() != null) {
+                try {
+                    localAudio = downloadFile(request.getAudioUrl(), tempDir, "audio");
+                } catch (Exception e) {
+                    log.warn("Audio download failed, continuing without audio: {}", e.getMessage());
+                }
+            }
 
             int imageDuration = calculateImageDuration(localImages.size(), request.getFps(), request.getTransitionDuration());
 
@@ -120,15 +128,19 @@ public class FFmpegVideoProvider implements VideoProvider {
         return null;
     }
 
-    private List<Path> downloadImages(List<String> urls, Path tempDir) throws Exception {
+    private List<Path> downloadImages(List<String> urls, Path tempDir) {
         List<Path> images = new ArrayList<>();
         int idx = 0;
         for (String url : urls) {
             String ext = guessExtension(url, ".png");
             Path target = tempDir.resolve("img_" + idx + ext);
-            downloadFile(url, target);
-            images.add(target);
-            idx++;
+            try {
+                downloadFile(url, target);
+                images.add(target);
+                idx++;
+            } catch (Exception e) {
+                log.warn("Skipping undownloadable image {}: {}", url, e.getMessage());
+            }
         }
         return images;
     }
@@ -162,6 +174,10 @@ public class FFmpegVideoProvider implements VideoProvider {
         }
     }
 
+    private String concatPath(Path path) {
+        return path.toAbsolutePath().toString().replace('\\', '/').replace("'", "'\\''");
+    }
+
     private String guessExtension(String url, String defaultExt) {
         String path = url.contains("?") ? url.substring(0, url.indexOf('?')) : url;
         int dot = path.lastIndexOf('.');
@@ -181,11 +197,11 @@ public class FFmpegVideoProvider implements VideoProvider {
         Path concatFile = tempDir.resolve("concat.txt");
         StringBuilder sb = new StringBuilder();
         for (Path img : images) {
-            sb.append("file '").append(img.toAbsolutePath().toString().replace("'", "'\\''")).append("'\n");
+            sb.append("file '").append(concatPath(img)).append("'\n");
             sb.append("duration ").append(durationPerImage).append("\n");
         }
         if (!images.isEmpty()) {
-            sb.append("file '").append(images.get(images.size() - 1).toAbsolutePath().toString().replace("'", "'\\''")).append("'\n");
+            sb.append("file '").append(concatPath(images.get(images.size() - 1))).append("'\n");
         }
         Files.writeString(concatFile, sb.toString());
         return concatFile;

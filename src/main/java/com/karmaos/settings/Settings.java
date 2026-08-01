@@ -7,6 +7,8 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.util.UUID;
 
@@ -23,6 +25,7 @@ public class Settings extends BaseEntity {
     @Column(name = "user_id")
     private UUID userId;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "settings_data", nullable = false, columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String settingsData = "{}";
 }

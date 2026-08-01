@@ -54,7 +54,6 @@ public class VoiceService {
         if (text.contains("review")) return "/reviews";
         if (text.contains("publish")) return "/publications";
         if (text.contains("knowledge")) return "/knowledge";
-        if (text.contains("skill")) return "/skills";
         if (text.contains("config") || text.contains("setting")) return "/config";
         return "/dashboard";
     }

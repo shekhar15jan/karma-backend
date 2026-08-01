@@ -27,26 +27,29 @@ public class WorkflowController {
     }
 
     @GetMapping("/runs")
-    public ResponseEntity<ApiResponse<List<WorkflowRunResponse>>> runs() {
-        return ResponseEntity.ok(ApiResponse.ok(workflowService.listRecentRuns()));
+    public ResponseEntity<ApiResponse<List<WorkflowRunResponse>>> runs(
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(workflowService.listRecentRuns(user.getId())));
     }
 
     @GetMapping("/projects/{projectId}/runs")
-    public ResponseEntity<ApiResponse<List<WorkflowRunResponse>>> projectRuns(@PathVariable UUID projectId) {
-        return ResponseEntity.ok(ApiResponse.ok(workflowService.listRuns(projectId)));
+    public ResponseEntity<ApiResponse<List<WorkflowRunResponse>>> projectRuns(
+            @PathVariable UUID projectId,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(workflowService.listRuns(projectId, user.getId())));
     }
 
     @PostMapping
     public ResponseEntity<ApiResponse<WorkflowDefinition>> saveWorkflow(
-            @Valid @RequestBody WorkflowDefinitionRequest request) {
-        return ResponseEntity.ok(ApiResponse.created(workflowService.createDefinition(request)));
+            @Valid @RequestBody WorkflowDefinitionRequest request,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.created(workflowService.createDefinition(request, user.getId())));
     }
 
     @PostMapping("/run")
     public ResponseEntity<ApiResponse<WorkflowRunResponse>> runWorkflow(
             @RequestBody WorkflowDefinitionRequest request,
             @AuthenticationPrincipal UserPrincipal user) {
-        UUID userId = user != null ? user.getId() : UUID.fromString("00000000-0000-0000-0000-000000000001");
-        return ResponseEntity.ok(ApiResponse.ok(workflowService.execute(request, userId)));
+        return ResponseEntity.ok(ApiResponse.ok(workflowService.execute(request, user.getId())));
     }
 }

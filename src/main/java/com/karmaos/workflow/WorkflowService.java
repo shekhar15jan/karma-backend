@@ -1,6 +1,11 @@
 package com.karmaos.workflow;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.karmaos.access.OwnershipService;
+import com.karmaos.agent.AgentRepository;
+import com.karmaos.common.ApiException;
+import com.karmaos.common.ErrorCode;
+import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionOrchestrator;
 import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
@@ -38,6 +43,8 @@ public class WorkflowService {
     private final MissionFlowRepository missionFlowRepository;
     private final WorkspaceRepository workspaceRepository;
     private final ProjectRepository projectRepository;
+    private final AgentRepository agentRepository;
+    private final OwnershipService ownershipService;
 
     public WorkflowService(WorkflowDefinitionRepository definitionRepository,
                            WorkflowRunRepository runRepository,
@@ -48,7 +55,9 @@ public class WorkflowService {
                            FlowAgentRepository flowAgentRepository,
                            MissionFlowRepository missionFlowRepository,
                            WorkspaceRepository workspaceRepository,
-                           ProjectRepository projectRepository) {
+                           ProjectRepository projectRepository,
+                           AgentRepository agentRepository,
+                           OwnershipService ownershipService) {
         this.definitionRepository = definitionRepository;
         this.runRepository = runRepository;
         this.objectMapper = objectMapper;
@@ -59,16 +68,23 @@ public class WorkflowService {
         this.missionFlowRepository = missionFlowRepository;
         this.workspaceRepository = workspaceRepository;
         this.projectRepository = projectRepository;
+        this.agentRepository = agentRepository;
+        this.ownershipService = ownershipService;
     }
 
-    public List<WorkflowDefinition> listDefinitions(UUID projectId) {
+    public List<WorkflowDefinition> listDefinitions(UUID projectId, UUID userId) {
+        ownershipService.getOwnedProject(userId, projectId);
         return definitionRepository.findByProjectIdOrderByCreatedAtDesc(projectId);
     }
 
     @Transactional
-    public WorkflowDefinition createDefinition(WorkflowDefinitionRequest request) {
+    public WorkflowDefinition createDefinition(WorkflowDefinitionRequest request, UUID userId) {
         WorkflowDefinition def = new WorkflowDefinition();
         def.setName(request.getName());
+        if (request.getProjectId() != null) {
+            ownershipService.getOwnedProject(userId, request.getProjectId());
+            def.setProjectId(request.getProjectId());
+        }
         try {
             def.setNodes(objectMapper.writeValueAsString(request.getNodes()));
             def.setEdges(objectMapper.writeValueAsString(request.getEdges()));
@@ -82,6 +98,7 @@ public class WorkflowService {
     @Transactional
     public WorkflowRunResponse execute(WorkflowDefinitionRequest request, UUID userId) {
         UUID projectId = resolveProjectId(userId);
+        validateAgentIds(request.getNodes());
 
         Mission mission = new Mission();
         mission.setProjectId(projectId);
@@ -118,8 +135,7 @@ public class WorkflowService {
         mf.setStatus("ACTIVE");
         missionFlowRepository.save(mf);
 
-        com.karmaos.execution.Execution execution = orchestrator.startExecution(mission.getId());
-        orchestrator.executeAsync(execution.getId());
+        Execution execution = orchestrator.startExecutionAfterCommit(mission.getId());
 
         WorkflowRun run = new WorkflowRun();
         run.setWorkflowName(request.getName());
@@ -132,6 +148,22 @@ public class WorkflowService {
         run = runRepository.save(run);
 
         return toResponse(run);
+    }
+
+    private void validateAgentIds(List<Map<String, Object>> nodes) {
+        if (nodes == null) {
+            return;
+        }
+        for (Map<String, Object> node : nodes) {
+            Object agentIdObj = node.get("agentId");
+            if (agentIdObj == null) {
+                continue;
+            }
+            UUID agentId = UUID.fromString(agentIdObj.toString());
+            agentRepository.findByIdAndStatus(agentId, "ACTIVE")
+                    .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST,
+                            "Agent not found or inactive: " + agentId));
+        }
     }
 
     private UUID resolveProjectId(UUID userId) {
@@ -161,15 +193,20 @@ public class WorkflowService {
         return project.getId();
     }
 
-    public List<WorkflowRunResponse> listRuns(UUID projectId) {
+    public List<WorkflowRunResponse> listRuns(UUID projectId, UUID userId) {
+        ownershipService.getOwnedProject(userId, projectId);
         return runRepository.findByProjectIdOrderByStartedAtDesc(projectId)
                 .stream()
                 .map(this::toResponse)
                 .collect(Collectors.toList());
     }
 
-    public List<WorkflowRunResponse> listRecentRuns() {
-        return runRepository.findByStatus("RUNNING")
+    public List<WorkflowRunResponse> listRecentRuns(UUID userId) {
+        List<UUID> projectIds = ownershipService.getOwnedProjectIds(userId);
+        if (projectIds.isEmpty()) {
+            return List.of();
+        }
+        return runRepository.findByProjectIdInOrderByStartedAtDesc(projectIds)
                 .stream()
                 .map(this::toResponse)
                 .collect(Collectors.toList());

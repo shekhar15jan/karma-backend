@@ -27,8 +27,10 @@ public class ProjectRequest {
     @Size(max = 2000)
     private String description;
 
+    @Size(max = 50)
     private String category;
     private List<String> tags;
+    @Size(max = 100)
     private String brandProfile;
     private UUID defaultProviderId;
 }

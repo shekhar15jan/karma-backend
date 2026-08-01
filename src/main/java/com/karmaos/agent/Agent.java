@@ -7,6 +7,8 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.util.UUID;
 
@@ -38,6 +40,7 @@ public class Agent extends BaseEntity {
     @Column(name = "fallback_provider_id")
     private UUID fallbackProviderId;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String configuration = "{}";
 }

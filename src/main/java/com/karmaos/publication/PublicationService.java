@@ -7,6 +7,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -18,7 +19,7 @@ public class PublicationService {
         this.publicationRepository = publicationRepository;
     }
 
-    public List<PublicationResponse> listByArtifact(Long artifactId) {
+    public List<PublicationResponse> listByArtifact(UUID artifactId) {
         return publicationRepository.findByArtifactIdOrderByCreatedAtDesc(artifactId)
                 .stream()
                 .map(this::toResponse)
@@ -36,7 +37,7 @@ public class PublicationService {
     }
 
     @Transactional
-    public PublicationResponse publish(Long id) {
+    public PublicationResponse publish(UUID id) {
         Publication pub = publicationRepository.findById(id)
                 .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Publication not found: " + id));
         pub.setStatus("PUBLISHED");

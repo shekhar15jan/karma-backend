@@ -47,13 +47,6 @@ public class GeminiProvider implements LLMProvider {
 
             List<Map<String, Object>> contents = new ArrayList<>();
 
-            if (request.getSystemPrompt() != null) {
-                contents.add(Map.of(
-                    "role", "user",
-                    "parts", List.of(Map.of("text", request.getSystemPrompt()))
-                ));
-            }
-
             String userMsg = request.getUserMessage() != null ? request.getUserMessage() : "";
             if (request.getMessages() != null) {
                 for (Map<String, String> msg : request.getMessages()) {
@@ -109,7 +102,11 @@ public class GeminiProvider implements LLMProvider {
 
     @Override
     public LLMResponse chatWithStream(LLMRequest request, Consumer<String> onChunk) {
-        return chat(request);
+        LLMResponse response = chat(request);
+        if (onChunk != null && response != null && response.isSuccess() && response.getContent() != null) {
+            onChunk.accept(response.getContent());
+        }
+        return response;
     }
 
     @Override

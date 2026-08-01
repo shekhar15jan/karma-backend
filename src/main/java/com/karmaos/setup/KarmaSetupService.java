@@ -110,7 +110,10 @@ public class KarmaSetupService {
     }
 
     private UUID findProviderByType(String providerType) {
-        List<Provider> providers = providerRepository.findByStatus("CONNECTED");
+        List<Provider> providers = providerRepository.findByStatus("CONNECTED").stream()
+                .filter(p -> p.getDeletedAt() == null)
+                .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
+                .toList();
         for (Provider p : providers) {
             if (providerType.equalsIgnoreCase(p.getProviderType())) {
                 return p.getId();
@@ -138,31 +141,40 @@ public class KarmaSetupService {
     private void createAndLinkSkills(UUID agentId) {
         List<SkillDefinition> skills = List.of(
             new SkillDefinition("System Architecture & Design",
-                    "Deep knowledge of KARMA OS architecture, solution design, data flow, integration patterns, and system specifications."),
+                    "Deep knowledge of KARMA OS architecture, stack, package map, and design. Source of truth: KARMA-BLACK-BOOK.md §3."),
             new SkillDefinition("Agent Management & Orchestration",
-                    "Understanding of all AI agents: Research, Planner, Script, Blog, Image, Thumbnail, Voice, Video, Review, Publishing. "
-                    + "Knows how agents are configured, deployed, and orchestrated in flows."),
+                    "Understanding of all AI agents: Research, Planner, Script, Blog, Image, Thumbnail, Voice, Video, Review, Publishing, Karma AI. "
+                    + "Knows how agents are configured, deployed, and orchestrated in flows. Source of truth: KARMA-BLACK-BOOK.md §5."),
             new SkillDefinition("Provider & LLM Configuration",
-                    "Knowledge of all provider types: OpenAI, Anthropic, Gemini, OpenRouter, OpenCode. "
-                    + "Knows how to configure API keys, endpoints, models, and capabilities."),
+                    "Knowledge of all provider types: OpenAI, Anthropic, Gemini, OpenRouter, OpenCode, Groq, Edge TTS, Stability, FFmpeg. "
+                    + "Knows how to configure API keys, endpoints, models, and capabilities. Source of truth: KARMA-BLACK-BOOK.md §6."),
             new SkillDefinition("Flow Design & Workflow Automation",
-                    "Expertise in visual workflow designer, multi-step pipelines, agent chaining, conditional logic, and execution ordering."),
+                    "Expertise in visual workflow designer, multi-step pipelines, agent chaining, and execution ordering. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §4."),
             new SkillDefinition("Mission Control & Execution",
-                    "Understanding of missions, executions, steps, progress tracking, error handling, and the full execution lifecycle."),
+                    "Understanding of missions, executions, steps, progress tracking, error handling, and the full execution lifecycle. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §4."),
             new SkillDefinition("Content Generation Pipeline",
-                    "Knowledge of the end-to-end content pipeline: research → planning → script → image → voice → video → review → publish."),
+                    "Knowledge of the end-to-end content pipeline: research → planning → script → image → voice → review → publish. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §2."),
             new SkillDefinition("Voice & Speech Systems",
-                    "Understanding of speech recognition (STT), text-to-speech (TTS), voice commands, and the browser Web Speech API integration."),
+                    "Understanding of speech recognition (STT), text-to-speech (TTS), voice commands, Karma AI chat, and the browser Web Speech API. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §9."),
             new SkillDefinition("Knowledge Management & RAG",
-                    "Knowledge of grounding documents, knowledge packs, retrieval-augmented generation, and how agents use external data."),
+                    "Knowledge of grounding documents, knowledge packs, the curated Black Book context, and on-demand document retrieval. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §12.5."),
             new SkillDefinition("UI/UX & User Experience",
-                    "Knowledge of the Angular frontend, dashboard layout, panel system, sidebar navigation, and all user-facing features."),
+                    "Knowledge of the Angular frontend, all routes and pages, dashboard layout, sidebar navigation, and user-facing features. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §8."),
             new SkillDefinition("Deployment & Operations",
-                    "Knowledge of Docker, PostgreSQL, Spring Boot build/run, environment configuration, and production operations."),
+                    "Knowledge of Docker, PostgreSQL, Spring Boot build/run, environment configuration, and production operations. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §10, §11."),
             new SkillDefinition("API & Integration",
-                    "Knowledge of all REST API endpoints, WebSocket events, authentication flow, and external service integration patterns."),
+                    "Knowledge of all REST API endpoints, WebSocket/SSE events, authentication flow, and external service integration. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §7."),
             new SkillDefinition("Security & Compliance",
-                    "Knowledge of authentication, authorization, encryption, API key management, and security best practices in KARMA OS.")
+                    "Knowledge of authentication, authorization, JWT, encryption, API key management, and security best practices in KARMA OS. "
+                    + "Source of truth: KARMA-BLACK-BOOK.md §10.")
         );
 
         for (SkillDefinition def : skills) {
@@ -173,6 +185,10 @@ public class KarmaSetupService {
             Skill skill;
             if (existingSkill.isPresent()) {
                 skill = existingSkill.get();
+                if (!def.description.equals(skill.getDescription())) {
+                    skill.setDescription(def.description);
+                    skillRepository.save(skill);
+                }
             } else {
                 skill = new Skill();
                 skill.setName(def.name);

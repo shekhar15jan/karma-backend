@@ -1,5 +1,6 @@
 package com.karmaos.report;
 
+import com.karmaos.access.OwnershipService;
 import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionRepository;
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -21,25 +23,34 @@ public class ReportService {
     private final ExecutionRepository executionRepository;
     private final ArtifactRepository artifactRepository;
     private final ProviderRepository providerRepository;
+    private final OwnershipService ownershipService;
 
     public ReportService(ProjectRepository projectRepository, MissionRepository missionRepository,
                          ExecutionRepository executionRepository, ArtifactRepository artifactRepository,
-                         ProviderRepository providerRepository) {
+                         ProviderRepository providerRepository, OwnershipService ownershipService) {
         this.projectRepository = projectRepository;
         this.missionRepository = missionRepository;
         this.executionRepository = executionRepository;
         this.artifactRepository = artifactRepository;
         this.providerRepository = providerRepository;
+        this.ownershipService = ownershipService;
     }
 
-    public Map<String, Object> dashboard() {
-        long totalProjects = projectRepository.count();
-        long activeMissions = missionRepository.countByStatus("RUNNING");
-        long completedToday = executionRepository.countByStatus("COMPLETED");
-        long failed = executionRepository.countByStatus("FAILED");
-        long totalArtifacts = artifactRepository.count();
+    public Map<String, Object> dashboard(UUID userId) {
+        List<UUID> projectIds = ownershipService.getOwnedProjectIds(userId);
+        List<UUID> missionIds = ownershipService.getOwnedMissionIds(userId);
+        long totalProjects = projectIds.isEmpty() ? 0 : projectRepository.countByWorkspaceIdInAndStatus(
+                ownershipService.getOwnedWorkspaceIds(userId), "ACTIVE");
+        long activeMissions = missionIds.isEmpty() ? 0
+                : missionRepository.countByProjectIdInAndStatus(projectIds, "RUNNING")
+                + missionRepository.countByProjectIdInAndStatus(projectIds, "WAITING");
+        long completedToday = missionIds.isEmpty() ? 0 : executionRepository.countByMissionIdInAndStatus(missionIds, "COMPLETED");
+        long failed = missionIds.isEmpty() ? 0 : executionRepository.countByMissionIdInAndStatus(missionIds, "FAILED");
+        long totalArtifacts = missionIds.isEmpty() ? 0 : artifactRepository.countByMissionIdIn(missionIds);
 
         Map<String, Object> providerHealth = providerRepository.findAll().stream()
+                .filter(p -> p.getDeletedAt() == null)
+                .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
                 .collect(Collectors.toMap(
                         p -> p.getId().toString(),
                         p -> Map.of("name", p.getName(), "status", p.getStatus())));
@@ -53,25 +64,31 @@ public class ReportService {
                 "providerHealth", providerHealth);
     }
 
-    public Map<String, Object> missions() {
-        long totalMissions = missionRepository.count();
-        long completed = missionRepository.countByStatus("COMPLETED");
-        long failed = missionRepository.countByStatus("FAILED");
-        long inProgress = missionRepository.countByStatus("RUNNING");
+    public Map<String, Object> missions(UUID userId) {
+        List<UUID> projectIds = ownershipService.getOwnedProjectIds(userId);
+        List<UUID> missionIds = ownershipService.getOwnedMissionIds(userId);
+        long totalMissions = missionIds.size();
+        long completed = missionIds.isEmpty() ? 0 : missionRepository.findByProjectIdInAndStatus(projectIds, "COMPLETED").size();
+        long failed = missionIds.isEmpty() ? 0 : missionRepository.findByProjectIdInAndStatus(projectIds, "FAILED").size();
+        long inProgress = missionIds.isEmpty() ? 0
+                : missionRepository.findByProjectIdInAndStatus(projectIds, "RUNNING").size()
+                + missionRepository.findByProjectIdInAndStatus(projectIds, "WAITING").size();
 
-        List<Execution> allExecutions = executionRepository.findAll();
-        double avgDuration = allExecutions.stream()
+        List<Execution> ownedExecutions = missionIds.isEmpty()
+                ? List.of()
+                : executionRepository.findByMissionIdInOrderByCreatedAtDesc(missionIds);
+        double avgDuration = ownedExecutions.stream()
                 .filter(e -> e.getDurationMs() != null)
                 .mapToLong(Execution::getDurationMs)
                 .average()
                 .orElse(0);
-        double avgCost = allExecutions.stream()
+        double avgCost = ownedExecutions.stream()
                 .filter(e -> e.getTotalCost() != null)
                 .mapToDouble(e -> e.getTotalCost().doubleValue())
                 .average()
                 .orElse(0);
 
-        Map<String, Long> byType = missionRepository.findAll().stream()
+        Map<String, Long> byType = missionRepository.findByProjectIdInAndStatusNot(projectIds, "DELETED").stream()
                 .filter(m -> m.getMissionType() != null)
                 .collect(Collectors.groupingBy(Mission::getMissionType, Collectors.counting()));
 

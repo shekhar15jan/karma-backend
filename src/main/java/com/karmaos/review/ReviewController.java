@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping(ApiConstants.REVIEWS)
@@ -26,8 +27,17 @@ public class ReviewController {
     }
 
     @GetMapping("/artifact/{artifactId}")
-    public ResponseEntity<ApiResponse<List<ReviewResponse>>> list(@PathVariable Long artifactId) {
-        return ResponseEntity.ok(ApiResponse.ok(reviewService.listByArtifact(artifactId)));
+    public ResponseEntity<ApiResponse<List<ReviewResponse>>> list(
+            @PathVariable UUID artifactId,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(reviewService.listByArtifact(artifactId, user)));
+    }
+
+    @GetMapping("/step/{stepId}")
+    public ResponseEntity<ApiResponse<List<ReviewResponse>>> listByStep(
+            @PathVariable UUID stepId,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(reviewService.listByStep(stepId, user)));
     }
 
     @PostMapping

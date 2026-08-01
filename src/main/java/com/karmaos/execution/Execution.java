@@ -22,6 +22,9 @@ public class Execution extends BaseEntity {
     @Column(name = "mission_id", nullable = false)
     private UUID missionId;
 
+    @Column(nullable = false, length = 20)
+    private String mode = "REVIEW";
+
     @Column(nullable = false, length = 50)
     private String status = "PENDING";
 

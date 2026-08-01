@@ -5,6 +5,7 @@ import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.execution.ExecutionStep;
 import com.karmaos.execution.ExecutionService;
 import com.karmaos.provider.Provider;
+import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
 import com.karmaos.publication.Publication;
 import com.karmaos.publication.PublicationRepository;
@@ -40,6 +41,7 @@ public class MediaOrchestrationService {
     private final VideoProviderFactory videoProviderFactory;
     private final SocialPublisherFactory socialPublisherFactory;
     private final ProviderRepository providerRepository;
+    private final ProviderKeyCipher providerKeyCipher;
     private final ArtifactRepository artifactRepository;
     private final PublicationRepository publicationRepository;
     private final ExecutionService executionService;
@@ -49,6 +51,7 @@ public class MediaOrchestrationService {
                                      VideoProviderFactory videoProviderFactory,
                                      SocialPublisherFactory socialPublisherFactory,
                                      ProviderRepository providerRepository,
+                                     ProviderKeyCipher providerKeyCipher,
                                      ArtifactRepository artifactRepository,
                                      PublicationRepository publicationRepository,
                                      ExecutionService executionService) {
@@ -57,23 +60,29 @@ public class MediaOrchestrationService {
         this.videoProviderFactory = videoProviderFactory;
         this.socialPublisherFactory = socialPublisherFactory;
         this.providerRepository = providerRepository;
+        this.providerKeyCipher = providerKeyCipher;
         this.artifactRepository = artifactRepository;
         this.publicationRepository = publicationRepository;
         this.executionService = executionService;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
-                                          int stepOrder, String contextData, UUID missionId) {
+                                          int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "IMAGE_GENERATION", contextData, missionId);
 
         try {
             Provider provider = resolveProviderForCapability(IMAGE_PROVIDER_TYPES, "openai");
-            ImageProvider imageProvider = provider != null
-                ? imageProviderFactory.getProvider(provider.getProviderType(), getApiKey(provider))
+            String apiKey = provider != null ? getApiKey(provider) : "";
+            ImageProvider imageProvider = (provider != null && !apiKey.isEmpty())
+                ? imageProviderFactory.getProvider(provider.getProviderType(), apiKey)
                 : imageProviderFactory.getFallbackProvider();
 
             ImageRequest request = new ImageRequest();
-            request.setPrompt(contextData != null ? contextData : "Generate an image based on the mission context");
+            String prompt = contextData != null ? contextData : "Generate an image based on the mission context";
+            if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
+                prompt += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
+            }
+            request.setPrompt(prompt);
             request.setModel(imageProvider.getDefaultModel());
 
             long start = System.currentTimeMillis();
@@ -111,17 +120,22 @@ public class MediaOrchestrationService {
     }
 
     public ExecutionStep executeVoiceStep(UUID executionId, UUID flowId, UUID agentId,
-                                          int stepOrder, String contextData, UUID missionId) {
+                                          int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "TTS", contextData, missionId);
 
         try {
             Provider provider = resolveProviderForCapability(VOICE_PROVIDER_TYPES, "openai");
-            VoiceProvider voiceProvider = provider != null
-                ? voiceProviderFactory.getProvider(provider.getProviderType(), getApiKey(provider))
+            String apiKey = provider != null ? getApiKey(provider) : "";
+            VoiceProvider voiceProvider = (provider != null && !apiKey.isEmpty())
+                ? voiceProviderFactory.getProvider(provider.getProviderType(), apiKey)
                 : voiceProviderFactory.getFallbackProvider();
 
             VoiceRequest request = new VoiceRequest();
-            request.setText(contextData != null ? contextData : "Sample narration text");
+            String text = contextData != null ? contextData : "Sample narration text";
+            if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
+                text += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
+            }
+            request.setText(text);
             request.setModel(voiceProvider.getDefaultModel());
 
             long start = System.currentTimeMillis();
@@ -159,7 +173,7 @@ public class MediaOrchestrationService {
     }
 
     public ExecutionStep executeVideoStep(UUID executionId, UUID flowId, UUID agentId,
-                                          int stepOrder, String contextData, UUID missionId) {
+                                          int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "VIDEO_GENERATION", contextData, missionId);
 
         try {
@@ -170,7 +184,11 @@ public class MediaOrchestrationService {
 
             VideoRequest request = new VideoRequest();
             request.setTitle("Video for Mission " + missionId);
-            request.setScript(contextData != null ? contextData : "Assemble video from generated assets");
+            String script = contextData != null ? contextData : "Assemble video from generated assets";
+            if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
+                script += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
+            }
+            request.setScript(script);
             
             // Collect existing audio and image artifacts
             List<Artifact> artifacts = artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId);
@@ -184,6 +202,17 @@ public class MediaOrchestrationService {
                     if (a.getStorageLocation() != null) {
                         imageUrls.add(a.getStorageLocation());
                     }
+                }
+            }
+            if (imageUrls.isEmpty()) {
+                ImageProvider imageProvider = imageProviderFactory.getFallbackProvider();
+                ImageRequest ir = new ImageRequest();
+                ir.setPrompt(contextData != null ? contextData : "Generated video background for mission " + missionId);
+                ir.setSize("1280x720");
+                ir.setN(3);
+                ImageResponse imgResp = imageProvider.generate(ir);
+                if (imgResp.isSuccess() && imgResp.getImageUrls() != null) {
+                    imageUrls.addAll(imgResp.getImageUrls());
                 }
             }
             request.setAudioUrl(audioUrl);
@@ -277,23 +306,26 @@ public class MediaOrchestrationService {
     }
 
     private Provider resolveProviderForCapability(Set<String> preferredTypes, String defaultType) {
-        for (Provider p : providerRepository.findByStatus("CONNECTED")) {
-            if (preferredTypes.contains(p.getProviderType().toLowerCase())) {
+        List<Provider> candidates = providerRepository.findByStatus("CONNECTED").stream()
+                .filter(p -> p.getDeletedAt() == null)
+                .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
+                .toList();
+        for (Provider p : candidates) {
+            if (p.getProviderType() != null && preferredTypes.contains(p.getProviderType().toLowerCase())) {
                 return p;
             }
         }
-        for (Provider p : providerRepository.findByStatus("CONNECTED")) {
-            if (p.getProviderType().toLowerCase().contains(defaultType)) {
+        for (Provider p : candidates) {
+            if (p.getProviderType() != null && p.getProviderType().toLowerCase().contains(defaultType)) {
                 return p;
             }
         }
-        List<Provider> all = providerRepository.findByStatus("CONNECTED");
-        return all.isEmpty() ? null : all.get(0);
+        return candidates.isEmpty() ? null : candidates.get(0);
     }
 
     private String getApiKey(Provider provider) {
-        if (provider == null || provider.getEncryptedApiKey() == null) return "";
-        return new String(provider.getEncryptedApiKey());
+        if (provider == null) return "";
+        return providerKeyCipher.decrypt(provider.getEncryptedApiKey());
     }
 
     private ExecutionStep createStep(UUID executionId, UUID flowId, UUID agentId,

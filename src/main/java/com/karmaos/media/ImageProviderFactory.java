@@ -29,6 +29,10 @@ public class ImageProviderFactory {
         return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey));
     }
 
+    public void evictAll() {
+        providerCache.clear();
+    }
+
     private ImageProvider createProvider(String providerType, String apiKey) {
         if (providerType == null) return getFallbackProvider();
         return switch (providerType.toLowerCase()) {
@@ -43,18 +47,6 @@ public class ImageProviderFactory {
     }
 
     public ImageProvider getFallbackProvider() {
-        return new ImageProvider() {
-            @Override public String getName() { return "mock-image"; }
-            @Override public String getDefaultModel() { return "mock-model"; }
-            @Override public List<String> getAvailableModels() { return List.of("mock-model"); }
-            @Override public ImageResponse generate(ImageRequest request) {
-                return ImageResponse.ok(
-                    List.of("https://example.com/mock-image.png"),
-                    request.getPrompt() != null ? request.getPrompt() : "",
-                    "mock-model", 5
-                );
-            }
-            @Override public boolean testConnection() { return true; }
-        };
+        return new LocalImageProvider();
     }
 }

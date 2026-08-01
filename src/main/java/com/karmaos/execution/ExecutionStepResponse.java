@@ -22,6 +22,7 @@ public class ExecutionStepResponse {
     private int stepOrder;
     private String stepType;
     private String status;
+    private String reviewStatus;
     private String inputData;
     private String outputData;
     private String promptUsed;

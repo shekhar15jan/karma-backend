@@ -2,7 +2,9 @@ package com.karmaos.project;
 
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
+import com.karmaos.auth.UserPrincipal;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -28,30 +30,39 @@ public class ProjectController {
     }
 
     @GetMapping
-    public ResponseEntity<ApiResponse<List<ProjectResponse>>> list(@RequestParam UUID workspaceId) {
-        return ResponseEntity.ok(ApiResponse.ok(projectService.listByWorkspace(workspaceId)));
+    public ResponseEntity<ApiResponse<List<ProjectResponse>>> list(
+            @RequestParam UUID workspaceId,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(projectService.listByWorkspace(workspaceId, user)));
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<ApiResponse<ProjectResponse>> get(@PathVariable UUID id) {
-        return ResponseEntity.ok(ApiResponse.ok(projectService.getById(id)));
+    public ResponseEntity<ApiResponse<ProjectResponse>> get(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(projectService.getById(id, user)));
     }
 
     @PostMapping
-    public ResponseEntity<ApiResponse<ProjectResponse>> create(@Valid @RequestBody ProjectRequest request) {
-        return ResponseEntity.ok(ApiResponse.created(projectService.create(request)));
+    public ResponseEntity<ApiResponse<ProjectResponse>> create(
+            @Valid @RequestBody ProjectRequest request,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.created(projectService.create(request, user)));
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<ApiResponse<ProjectResponse>> update(
             @PathVariable UUID id,
-            @Valid @RequestBody ProjectRequest request) {
-        return ResponseEntity.ok(ApiResponse.ok(projectService.update(id, request)));
+            @Valid @RequestBody ProjectRequest request,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(projectService.update(id, request, user)));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {
-        projectService.delete(id);
+    public ResponseEntity<ApiResponse<Void>> delete(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        projectService.delete(id, user);
         return ResponseEntity.ok(ApiResponse.ok(null, "Project deleted"));
     }
 }

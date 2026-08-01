@@ -19,12 +19,15 @@ public class KarmaDocService {
 
     private static final Logger log = LoggerFactory.getLogger(KarmaDocService.class);
     private static final String DOCS_DIR = "../docs";
+    private static final String BLACK_BOOK_FILE = "KARMA-BLACK-BOOK.md";
+    private static final String BLACK_BOOK_CATEGORY = "BLACK_BOOK";
 
     private final Map<String, DocEntry> documents = new LinkedHashMap<>();
 
     @PostConstruct
     public void init() {
         loadDocuments();
+        loadBlackBook();
     }
 
     public void loadDocuments() {
@@ -58,6 +61,32 @@ public class KarmaDocService {
         } catch (IOException e) {
             log.warn("Failed to read {}", filePath, e);
         }
+    }
+
+    private void loadFile(Path filePath, String category) {
+        try {
+            String content = Files.readString(filePath);
+            String fileName = filePath.getFileName().toString();
+            String title = deriveTitle(fileName, content);
+            documents.put(fileName, new DocEntry(fileName, title, category, content));
+        } catch (IOException e) {
+            log.warn("Failed to read {}", filePath, e);
+        }
+    }
+
+    private void loadBlackBook() {
+        Path[] candidates = {
+            Paths.get("..", BLACK_BOOK_FILE).toAbsolutePath().normalize(),
+            Paths.get(BLACK_BOOK_FILE).toAbsolutePath().normalize()
+        };
+        for (Path path : candidates) {
+            if (Files.exists(path)) {
+                loadFile(path, BLACK_BOOK_CATEGORY);
+                log.info("Loaded Black Book from {}", path);
+                return;
+            }
+        }
+        log.warn("Karma OS Black Book not found (looked in {})", candidates[0]);
     }
 
     private String deriveTitle(String fileName, String content) {
@@ -116,9 +145,31 @@ public class KarmaDocService {
         StringBuilder sb = new StringBuilder();
         sb.append("KARMA OS Documentation:\n\n");
         for (DocEntry entry : documents.values()) {
+            if (BLACK_BOOK_CATEGORY.equals(entry.category())) continue;
             String summary = summarize(entry.content, 200);
             sb.append("- ").append(entry.title).append(" (").append(entry.category).append("): ");
             sb.append(summary).append("\n");
+        }
+        return sb.toString();
+    }
+
+    public String getCuratedContext() {
+        DocEntry blackBook = documents.get(BLACK_BOOK_FILE);
+        if (blackBook == null) {
+            return "KARMA OS Black Book: unavailable. The authoritative reference could not be loaded.";
+        }
+        return "KARMA OS BLACK BOOK (authoritative reference — single source of truth):\n\n" + blackBook.content();
+    }
+
+    public String listAvailableDocuments() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Reference documents available on demand (when the user asks for a specific spec, "
+                + "respond with intent \"doc\" and target = the exact filename):\n");
+        for (DocEntry entry : documents.values()) {
+            if (BLACK_BOOK_CATEGORY.equals(entry.category())) continue;
+            String summary = summarize(entry.content, 120);
+            sb.append("- ").append(entry.fileName()).append(" (").append(entry.category()).append("): ")
+              .append(summary).append("\n");
         }
         return sb.toString();
     }

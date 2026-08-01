@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -14,9 +15,17 @@ public interface ProjectRepository extends JpaRepository<Project, UUID> {
 
     List<Project> findByWorkspaceIdAndStatus(UUID workspaceId, String status);
 
+    List<Project> findByWorkspaceIdInAndStatus(Collection<UUID> workspaceIds, String status);
+
     Optional<Project> findByIdAndStatus(UUID id, String status);
 
     long countByWorkspaceIdAndStatus(UUID workspaceId, String status);
+
+    long countByWorkspaceIdInAndStatus(Collection<UUID> workspaceIds, String status);
+
+    boolean existsByWorkspaceIdAndNameIgnoreCaseAndStatus(UUID workspaceId, String name, String status);
+
+    boolean existsByWorkspaceIdAndNameIgnoreCaseAndStatusAndIdNot(UUID workspaceId, String name, String status, UUID id);
 
     List<Project> findByNameContainingIgnoreCase(String name);
 }

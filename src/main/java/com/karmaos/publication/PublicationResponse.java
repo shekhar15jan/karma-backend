@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -13,8 +14,8 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 public class PublicationResponse {
 
-    private Long id;
-    private Long artifactId;
+    private UUID id;
+    private UUID artifactId;
     private String destination;
     private String status;
     private LocalDateTime publishedAt;

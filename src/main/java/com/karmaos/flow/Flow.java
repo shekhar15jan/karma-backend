@@ -7,6 +7,8 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(name = "flows")
@@ -30,6 +32,7 @@ public class Flow extends BaseEntity {
     @Column(nullable = false)
     private boolean enabled = true;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String parameters = "{}";
 }

@@ -100,7 +100,11 @@ public class GroqProvider implements LLMProvider {
 
     @Override
     public LLMResponse chatWithStream(LLMRequest request, Consumer<String> onChunk) {
-        return chat(request);
+        LLMResponse response = chat(request);
+        if (onChunk != null && response != null && response.isSuccess() && response.getContent() != null) {
+            onChunk.accept(response.getContent());
+        }
+        return response;
     }
 
     @Override

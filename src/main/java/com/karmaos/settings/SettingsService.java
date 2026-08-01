@@ -1,7 +1,6 @@
 package com.karmaos.settings;
 
 import com.karmaos.common.ApiException;
-import com.karmaos.common.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,7 +25,7 @@ public class SettingsService {
             existing = repository.findByUserId(userId);
         }
         return existing.map(this::toResponse)
-                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Settings not found"));
+                .orElseGet(() -> SettingsResponse.builder().settingsData("{}").build());
     }
 
     @Transactional

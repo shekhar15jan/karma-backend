@@ -1,30 +1,42 @@
 package com.karmaos.calendar;
 
+import com.karmaos.access.OwnershipService;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
+import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @RestController
 @RequestMapping(ApiConstants.API_V1 + "/calendar")
 public class CalendarController {
 
     private final ArtifactRepository artifactRepository;
+    private final OwnershipService ownershipService;
 
-    public CalendarController(ArtifactRepository artifactRepository) {
+    public CalendarController(ArtifactRepository artifactRepository, OwnershipService ownershipService) {
         this.artifactRepository = artifactRepository;
+        this.ownershipService = ownershipService;
     }
 
     @GetMapping("/events")
-    public ResponseEntity<ApiResponse<List<Map<String, Object>>>> events() {
-        List<Artifact> published = artifactRepository.findByPublicationStatus("PUBLISHED");
+    public ResponseEntity<ApiResponse<List<Map<String, Object>>>> events(
+            @AuthenticationPrincipal UserPrincipal user) {
+        List<UUID> missionIds = ownershipService.getOwnedMissionIds(user.getId());
+        List<Artifact> published = missionIds.isEmpty()
+                ? List.of()
+                : artifactRepository.findByPublicationStatus("PUBLISHED").stream()
+                        .filter(a -> missionIds.contains(a.getMissionId()))
+                        .toList();
         var events = published.stream()
                 .map(a -> Map.<String, Object>of(
                         "id", a.getId().toString(),

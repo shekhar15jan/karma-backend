@@ -1,6 +1,6 @@
 package com.karmaos.review;
 
-import com.karmaos.common.BaseEntityLongId;
+import com.karmaos.common.BaseEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
@@ -15,10 +15,13 @@ import java.util.UUID;
 @Getter
 @Setter
 @NoArgsConstructor
-public class Review extends BaseEntityLongId {
+public class Review extends BaseEntity {
 
-    @Column(name = "artifact_id", nullable = false)
-    private Long artifactId;
+    @Column(name = "artifact_id")
+    private UUID artifactId;
+
+    @Column(name = "step_id")
+    private UUID stepId;
 
     @Column(name = "reviewer_id", nullable = false)
     private UUID reviewerId;

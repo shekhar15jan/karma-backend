@@ -2,8 +2,11 @@ package com.karmaos.artifact;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.karmaos.access.OwnershipService;
+import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
+import com.karmaos.execution.ExecutionOrchestrator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,45 +20,59 @@ public class ArtifactService {
 
     private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;
+    private final ExecutionOrchestrator executionOrchestrator;
+    private final OwnershipService ownershipService;
 
-    public ArtifactService(ArtifactRepository artifactRepository, ObjectMapper objectMapper) {
+    public ArtifactService(ArtifactRepository artifactRepository, ObjectMapper objectMapper,
+                           ExecutionOrchestrator executionOrchestrator, OwnershipService ownershipService) {
         this.artifactRepository = artifactRepository;
         this.objectMapper = objectMapper;
+        this.executionOrchestrator = executionOrchestrator;
+        this.ownershipService = ownershipService;
     }
 
-    public List<ArtifactResponse> listAll() {
-        return artifactRepository.findAll()
+    public List<ArtifactResponse> listAll(UUID userId) {
+        return artifactRepository.findByMissionIdInOrderByCreatedAtDesc(ownershipService.getOwnedMissionIds(userId))
                 .stream()
                 .map(this::toResponse)
                 .collect(Collectors.toList());
     }
 
-    public List<ArtifactResponse> listByMission(UUID missionId) {
+    public List<ArtifactResponse> listByMission(UUID missionId, UserPrincipal user) {
+        ownershipService.getOwnedMission(user.getId(), missionId);
         return artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId)
                 .stream()
                 .map(this::toResponse)
                 .collect(Collectors.toList());
     }
 
-    public ArtifactResponse getById(Long id) {
-        Artifact artifact = artifactRepository.findById(id)
-                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Artifact not found: " + id));
-        return toResponse(artifact);
+    public ArtifactResponse getById(UUID id, UserPrincipal user) {
+        return toResponse(ownershipService.getOwnedArtifact(user.getId(), id));
     }
 
-    public List<ArtifactResponse> listPendingReview() {
-        return artifactRepository.findByReviewStatus("PENDING")
+    public List<ArtifactResponse> listPendingReview(UUID userId) {
+        return artifactRepository.findByMissionIdInOrderByCreatedAtDesc(ownershipService.getOwnedMissionIds(userId))
                 .stream()
+                .filter(a -> "PENDING".equals(a.getReviewStatus()) && a.getExecutionStepId() == null)
                 .map(this::toResponse)
                 .collect(Collectors.toList());
     }
 
     @Transactional
-    public ArtifactResponse updateReviewStatus(Long id, String status) {
-        Artifact artifact = artifactRepository.findById(id)
-                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Artifact not found: " + id));
+    public ArtifactResponse updateReviewStatus(UUID id, String status, UserPrincipal user) {
+        return updateReviewStatus(id, status, null, user);
+    }
+
+    @Transactional
+    public ArtifactResponse updateReviewStatus(UUID id, String status, String feedback, UserPrincipal user) {
+        Artifact artifact = ownershipService.getOwnedArtifact(user.getId(), id);
         artifact.setReviewStatus(status);
         artifact = artifactRepository.save(artifact);
+        if ("APPROVED".equals(status)) {
+            executionOrchestrator.onArtifactApproved(id);
+        } else if ("REJECTED".equals(status)) {
+            executionOrchestrator.onArtifactRejected(id, feedback);
+        }
         return toResponse(artifact);
     }
 

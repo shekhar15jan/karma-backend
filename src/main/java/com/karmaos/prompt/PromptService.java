@@ -24,7 +24,7 @@ public class PromptService {
     }
 
     public List<PromptResponse> list() {
-        return promptRepository.findByStatus("DRAFT")
+        return promptRepository.findByStatusIn(List.of("ACTIVE", "DRAFT"))
                 .stream()
                 .map(this::toResponse)
                 .collect(Collectors.toList());

@@ -5,6 +5,7 @@ public class VoiceChatResponse {
     private String intent;
     private String target;
     private boolean fromLlm;
+    private String language;
 
     public VoiceChatResponse() {}
 
@@ -23,6 +24,8 @@ public class VoiceChatResponse {
     public void setTarget(String target) { this.target = target; }
     public boolean isFromLlm() { return fromLlm; }
     public void setFromLlm(boolean fromLlm) { this.fromLlm = fromLlm; }
+    public String getLanguage() { return language; }
+    public void setLanguage(String language) { this.language = language; }
 
     public static VoiceChatResponse fromLlm(String reply, String intent, String target) {
         return new VoiceChatResponse(reply, intent, target, true);

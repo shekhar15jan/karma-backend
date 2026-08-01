@@ -14,8 +14,9 @@ import java.util.UUID;
 @AllArgsConstructor
 public class ReviewResponse {
 
-    private Long id;
-    private Long artifactId;
+    private UUID id;
+    private UUID artifactId;
+    private UUID stepId;
     private UUID reviewerId;
     private String decision;
     private String comments;

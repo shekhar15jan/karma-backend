@@ -17,6 +17,7 @@ public class ExecutionResponse {
 
     private UUID id;
     private UUID missionId;
+    private String mode;
     private String status;
     private LocalDateTime startedAt;
     private LocalDateTime completedAt;

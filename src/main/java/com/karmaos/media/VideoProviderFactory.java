@@ -26,6 +26,10 @@ public class VideoProviderFactory {
         return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey));
     }
 
+    public void evictAll() {
+        providerCache.clear();
+    }
+
     private VideoProvider createProvider(String providerType, String apiKey) {
         if (providerType == null) return getFallbackProvider();
         return switch (providerType.toLowerCase()) {

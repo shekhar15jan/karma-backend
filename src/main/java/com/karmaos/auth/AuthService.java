@@ -95,7 +95,7 @@ public class AuthService {
     }
 
     public AuthResponse refresh(RefreshTokenRequest request) {
-        if (!tokenProvider.validateToken(request.getRefreshToken())) {
+        if (!tokenProvider.validateRefreshToken(request.getRefreshToken())) {
             throw ErrorCode.TOKEN_INVALID.exception("Invalid refresh token");
         }
 

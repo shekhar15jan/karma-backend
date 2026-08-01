@@ -15,7 +15,7 @@ import java.util.UUID;
 @AllArgsConstructor
 public class ArtifactResponse {
 
-    private Long id;
+    private UUID id;
     private UUID missionId;
     private UUID executionStepId;
     private String name;

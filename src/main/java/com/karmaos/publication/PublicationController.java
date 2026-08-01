@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping(ApiConstants.PUBLICATIONS)
@@ -24,7 +25,7 @@ public class PublicationController {
     }
 
     @GetMapping("/artifact/{artifactId}")
-    public ResponseEntity<ApiResponse<List<PublicationResponse>>> list(@PathVariable Long artifactId) {
+    public ResponseEntity<ApiResponse<List<PublicationResponse>>> list(@PathVariable UUID artifactId) {
         return ResponseEntity.ok(ApiResponse.ok(publicationService.listByArtifact(artifactId)));
     }
 
@@ -34,7 +35,7 @@ public class PublicationController {
     }
 
     @PostMapping("/{id}/publish")
-    public ResponseEntity<ApiResponse<PublicationResponse>> publish(@PathVariable Long id) {
+    public ResponseEntity<ApiResponse<PublicationResponse>> publish(@PathVariable UUID id) {
         return ResponseEntity.ok(ApiResponse.ok(publicationService.publish(id)));
     }
 }

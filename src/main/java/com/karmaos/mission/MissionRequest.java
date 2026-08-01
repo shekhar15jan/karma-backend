@@ -1,6 +1,7 @@
 package com.karmaos.mission;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -16,6 +17,7 @@ import java.util.UUID;
 @AllArgsConstructor
 public class MissionRequest {
 
+    @NotNull
     private UUID projectId;
 
     @NotBlank
@@ -28,6 +30,5 @@ public class MissionRequest {
     private String missionType;
     private String priority;
     private UUID providerId;
-    private List<UUID> sourceDocumentIds;
     private List<UUID> selectedFlowIds;
 }

@@ -41,20 +41,25 @@ public class WorkspaceController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<ApiResponse<WorkspaceResponse>> get(@PathVariable UUID id) {
-        return ResponseEntity.ok(ApiResponse.ok(workspaceService.getById(id)));
+    public ResponseEntity<ApiResponse<WorkspaceResponse>> get(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(workspaceService.getById(id, user)));
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<ApiResponse<WorkspaceResponse>> update(
             @PathVariable UUID id,
-            @Valid @RequestBody WorkspaceRequest request) {
-        return ResponseEntity.ok(ApiResponse.ok(workspaceService.update(id, request)));
+            @Valid @RequestBody WorkspaceRequest request,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(workspaceService.update(id, request, user)));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {
-        workspaceService.delete(id);
+    public ResponseEntity<ApiResponse<Void>> delete(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        workspaceService.delete(id, user);
         return ResponseEntity.ok(ApiResponse.ok(null, "Workspace deleted"));
     }
 }

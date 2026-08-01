@@ -7,6 +7,8 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(name = "skills")
@@ -27,9 +29,11 @@ public class Skill extends BaseEntity {
     @Column(nullable = false, length = 50)
     private String status = "DRAFT";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "validation_rules", columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String validationRules = "{}";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "execution_parameters", columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String executionParameters = "{}";
 }

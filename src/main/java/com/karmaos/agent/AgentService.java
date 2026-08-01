@@ -2,6 +2,8 @@ package com.karmaos.agent;
 
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
+import com.karmaos.provider.Provider;
+import com.karmaos.provider.ProviderRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -13,9 +15,11 @@ import java.util.stream.Collectors;
 public class AgentService {
 
     private final AgentRepository agentRepository;
+    private final ProviderRepository providerRepository;
 
-    public AgentService(AgentRepository agentRepository) {
+    public AgentService(AgentRepository agentRepository, ProviderRepository providerRepository) {
         this.agentRepository = agentRepository;
+        this.providerRepository = providerRepository;
     }
 
     public List<AgentResponse> list() {
@@ -33,6 +37,7 @@ public class AgentService {
 
     @Transactional
     public AgentResponse create(AgentRequest request) {
+        validateProviders(request);
         Agent agent = new Agent();
         agent.setName(request.getName());
         agent.setDescription(request.getDescription());
@@ -49,6 +54,7 @@ public class AgentService {
     public AgentResponse update(UUID id, AgentRequest request) {
         Agent agent = agentRepository.findByIdAndStatus(id, "ACTIVE")
                 .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Agent not found: " + id));
+        validateProviders(request);
         agent.setName(request.getName());
         agent.setDescription(request.getDescription());
         agent.setCategory(request.getCategory());
@@ -66,6 +72,20 @@ public class AgentService {
                 .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Agent not found: " + id));
         agent.softDelete();
         agentRepository.save(agent);
+    }
+
+    private void validateProviders(AgentRequest request) {
+        validateProvider(request.getDefaultProviderId());
+        validateProvider(request.getFallbackProviderId());
+    }
+
+    private void validateProvider(UUID providerId) {
+        if (providerId == null) return;
+        Provider provider = providerRepository.findById(providerId)
+                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Provider not found: " + providerId));
+        if (provider.getDeletedAt() != null || "PUBLISHING".equalsIgnoreCase(provider.getProviderType())) {
+            throw ErrorCode.NOT_FOUND.exception("Provider not available: " + providerId);
+        }
     }
 
     private AgentResponse toResponse(Agent a) {

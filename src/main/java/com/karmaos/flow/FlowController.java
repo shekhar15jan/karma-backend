@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import java.util.List;
 import java.util.UUID;
 
@@ -37,11 +38,13 @@ public class FlowController {
     }
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<FlowResponse>> create(@Valid @RequestBody FlowRequest request) {
         return ResponseEntity.ok(ApiResponse.created(flowService.create(request)));
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<FlowResponse>> update(
             @PathVariable UUID id,
             @Valid @RequestBody FlowRequest request) {
@@ -49,6 +52,7 @@ public class FlowController {
     }
 
     @DeleteMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {
         flowService.delete(id);
         return ResponseEntity.ok(ApiResponse.ok(null, "Flow deleted"));

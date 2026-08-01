@@ -3,6 +3,7 @@ package com.karmaos.provider;
 import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -38,16 +39,19 @@ public class ProviderController {
     }
 
     @PostMapping("/{id}/test")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<Map<String, Object>>> testConnection(@PathVariable UUID id) {
         return ResponseEntity.ok(ApiResponse.ok(providerService.testConnection(id)));
     }
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<ProviderResponse>> create(@Valid @RequestBody ProviderRequest request) {
         return ResponseEntity.ok(ApiResponse.created(providerService.create(request)));
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<ProviderResponse>> update(
             @PathVariable UUID id,
             @Valid @RequestBody ProviderRequest request) {
@@ -55,6 +59,7 @@ public class ProviderController {
     }
 
     @DeleteMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {
         providerService.delete(id);
         return ResponseEntity.ok(ApiResponse.ok(null, "Provider deleted"));

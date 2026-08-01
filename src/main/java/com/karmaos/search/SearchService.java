@@ -1,5 +1,6 @@
 package com.karmaos.search;
 
+import com.karmaos.access.OwnershipService;
 import com.karmaos.mission.MissionRepository;
 import com.karmaos.project.ProjectRepository;
 import com.karmaos.flow.FlowRepository;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Service
 public class SearchService {
@@ -20,18 +22,20 @@ public class SearchService {
     private final FlowRepository flowRepository;
     private final AgentRepository agentRepository;
     private final KnowledgePackRepository knowledgePackRepository;
+    private final OwnershipService ownershipService;
 
     public SearchService(MissionRepository missionRepository, ProjectRepository projectRepository,
                          FlowRepository flowRepository, AgentRepository agentRepository,
-                         KnowledgePackRepository knowledgePackRepository) {
+                         KnowledgePackRepository knowledgePackRepository, OwnershipService ownershipService) {
         this.missionRepository = missionRepository;
         this.projectRepository = projectRepository;
         this.flowRepository = flowRepository;
         this.agentRepository = agentRepository;
         this.knowledgePackRepository = knowledgePackRepository;
+        this.ownershipService = ownershipService;
     }
 
-    public Map<String, Object> search(String query, int page, int size) {
+    public Map<String, Object> search(String query, int page, int size, UUID userId) {
         long start = System.currentTimeMillis();
         List<Map<String, Object>> results = new ArrayList<>();
 
@@ -39,21 +43,26 @@ public class SearchService {
             return Map.of("results", List.of(), "total", 0, "took", 0);
         }
 
-        String likePattern = "%" + query.toLowerCase() + "%";
+        List<UUID> ownedProjectIds = ownershipService.getOwnedProjectIds(userId);
+        List<UUID> ownedMissionIds = ownershipService.getOwnedMissionIds(userId);
 
-        projectRepository.findByNameContainingIgnoreCase(query).forEach(p -> {
+        projectRepository.findByNameContainingIgnoreCase(query).stream()
+                .filter(p -> ownedProjectIds.contains(p.getId()))
+                .forEach(p -> {
             results.add(Map.of(
                     "id", p.getId(), "type", "project", "name", p.getName(),
                     "description", p.getDescription() != null ? p.getDescription() : ""));
         });
 
-        missionRepository.findByNameContainingIgnoreCase(query).forEach(m -> {
+        missionRepository.findByNameContainingIgnoreCase(query).stream()
+                .filter(m -> ownedMissionIds.contains(m.getId()))
+                .forEach(m -> {
             results.add(Map.of(
                     "id", m.getId(), "type", "mission", "name", m.getName(),
                     "description", m.getDescription() != null ? m.getDescription() : ""));
         });
 
-        flowRepository.findByNameContainingIgnoreCase(query).forEach(f -> {
+        flowRepository.findByNameContainingIgnoreCaseAndStatus(query, "ACTIVE").forEach(f -> {
             results.add(Map.of(
                     "id", f.getId(), "type", "flow", "name", f.getName(),
                     "description", f.getDescription() != null ? f.getDescription() : ""));
@@ -72,6 +81,14 @@ public class SearchService {
         });
 
         long took = System.currentTimeMillis() - start;
-        return Map.of("results", results, "total", results.size(), "took", (int) took);
+        int total = results.size();
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.max(size, 1);
+        int from = Math.min(safePage * safeSize, total);
+        int to = Math.min(from + safeSize, total);
+        List<Map<String, Object>> pageResults = total == 0
+                ? List.of()
+                : new ArrayList<>(results.subList(from, to));
+        return Map.of("results", pageResults, "total", total, "took", (int) took);
     }
 }

@@ -21,6 +21,7 @@ public class FlowResponse {
     private String category;
     private int executionOrder;
     private boolean enabled;
+    private String status;
     private List<UUID> agentIds;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

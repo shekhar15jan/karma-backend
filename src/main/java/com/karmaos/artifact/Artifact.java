@@ -1,12 +1,14 @@
 package com.karmaos.artifact;
 
-import com.karmaos.common.BaseEntityLongId;
+import com.karmaos.common.BaseEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.util.UUID;
 
@@ -15,7 +17,7 @@ import java.util.UUID;
 @Getter
 @Setter
 @NoArgsConstructor
-public class Artifact extends BaseEntityLongId {
+public class Artifact extends BaseEntity {
 
     @Column(name = "mission_id", nullable = false)
     private UUID missionId;
@@ -47,6 +49,7 @@ public class Artifact extends BaseEntityLongId {
     @Column(name = "content_type", length = 100)
     private String contentType = "text/markdown";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String metadata = "{}";
 
@@ -56,6 +59,7 @@ public class Artifact extends BaseEntityLongId {
     @Column(name = "publication_status", nullable = false, length = 50)
     private String publicationStatus = "UNPUBLISHED";
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '[]'::jsonb")
     private String tags = "[]";
 

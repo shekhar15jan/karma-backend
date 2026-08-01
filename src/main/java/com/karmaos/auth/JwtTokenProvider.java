@@ -75,6 +75,19 @@ public class JwtTokenProvider {
         return claims.get("roles", List.class);
     }
 
+    public boolean validateRefreshToken(String token) {
+        if (!validateToken(token)) {
+            return false;
+        }
+        try {
+            Claims claims = parseToken(token);
+            return "refresh".equals(claims.get("type", String.class));
+        } catch (Exception e) {
+            log.warn("Invalid refresh token: {}", e.getMessage());
+            return false;
+        }
+    }
+
     public boolean validateToken(String token) {
         try {
             parseToken(token);

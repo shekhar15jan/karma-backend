@@ -11,6 +11,7 @@ import com.karmaos.llm.LLMProviderFactory;
 import com.karmaos.llm.LLMRequest;
 import com.karmaos.llm.LLMResponse;
 import com.karmaos.provider.Provider;
+import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
 import com.karmaos.prompt.Prompt;
 import com.karmaos.prompt.PromptRepository;
@@ -18,6 +19,7 @@ import com.karmaos.skill.Skill;
 import com.karmaos.skill.SkillRepository;
 import com.karmaos.sourcedocument.SourceDocument;
 import com.karmaos.sourcedocument.SourceDocumentRepository;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -46,6 +48,7 @@ public class AgentRuntimeService {
 
     private final LLMProviderFactory providerFactory;
     private final ProviderRepository providerRepository;
+    private final ProviderKeyCipher providerKeyCipher;
     private final PromptRepository promptRepository;
     private final SkillRepository skillRepository;
     private final FlowRepository flowRepository;
@@ -57,6 +60,7 @@ public class AgentRuntimeService {
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
                                ProviderRepository providerRepository,
+                               ProviderKeyCipher providerKeyCipher,
                                PromptRepository promptRepository,
                                SkillRepository skillRepository,
                                FlowRepository flowRepository,
@@ -67,6 +71,7 @@ public class AgentRuntimeService {
                                ObjectMapper objectMapper) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
+        this.providerKeyCipher = providerKeyCipher;
         this.promptRepository = promptRepository;
         this.skillRepository = skillRepository;
         this.flowRepository = flowRepository;
@@ -78,7 +83,7 @@ public class AgentRuntimeService {
     }
 
     public ExecutionStep executeAgentStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
-                                          String contextData, UUID missionId) {
+                                          String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = new ExecutionStep();
         step.setExecutionId(executionId);
         step.setFlowId(flowId);
@@ -90,19 +95,19 @@ public class AgentRuntimeService {
         step.setInputData(contextData);
 
         try {
-            Flow flow = flowRepository.findById(flowId).orElse(null);
+            Flow flow = flowRepository.findByIdAndStatus(flowId, "ACTIVE").orElse(null);
             Agent agent = agentRepository.findById(agentId).orElse(null);
             if (agent == null) {
                 throw new RuntimeException("Agent not found: " + agentId);
             }
 
             String systemPrompt = buildSystemPrompt(agent, flow, missionId);
-            String userMessage = buildUserMessage(agent, contextData, missionId);
+            String userMessage = buildUserMessage(agent, contextData, missionId, reviewerFeedback);
 
             Provider provider = resolveProvider(agent);
             LLMProvider llmProvider = resolveLLMProvider(provider);
 
-            String modelUsed = llmProvider.getDefaultModel();
+            String modelUsed = resolveModel(provider, llmProvider);
             step.setProviderId(provider != null ? provider.getId() : null);
             step.setModelUsed(modelUsed);
             step.setPromptUsed(systemPrompt + "\n\n" + userMessage);
@@ -118,7 +123,7 @@ public class AgentRuntimeService {
                 provider = providerRepository.findById(agent.getFallbackProviderId()).orElse(null);
                 llmProvider = resolveLLMProvider(provider);
                 if (llmProvider != null && !llmProvider.getName().equals("mock")) {
-                    modelUsed = llmProvider.getDefaultModel();
+                    modelUsed = resolveModel(provider, llmProvider);
                     request.setModel(modelUsed);
                     step.setProviderId(provider != null ? provider.getId() : null);
                     step.setModelUsed(modelUsed);
@@ -180,7 +185,7 @@ public class AgentRuntimeService {
         return sb.toString();
     }
 
-    private String buildUserMessage(Agent agent, String contextData, UUID missionId) {
+    private String buildUserMessage(Agent agent, String contextData, UUID missionId, String reviewerFeedback) {
         StringBuilder sb = new StringBuilder();
 
         if (contextData != null && !contextData.isEmpty()) {
@@ -199,6 +204,11 @@ public class AgentRuntimeService {
         if (agent != null) {
             sb.append("Instructions for ").append(agent.getName()).append(":\n");
             sb.append("Process the above context and produce the required output for this step.\n");
+        }
+
+        if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
+            sb.append("\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n").append(reviewerFeedback)
+              .append("\nPlease revise your output accordingly and address every point above.\n");
         }
 
         return sb.toString();
@@ -220,33 +230,50 @@ public class AgentRuntimeService {
         UUID providerId = agent.getDefaultProviderId();
         if (providerId != null) {
             Provider p = providerRepository.findById(providerId).orElse(null);
-            if (p != null) {
+            if (p != null && p.getDeletedAt() == null && !"PUBLISHING".equalsIgnoreCase(p.getProviderType())) {
                 log.info("Resolved default provider {} for agent {}", p.getProviderType(), agent.getName());
+                return p;
             }
-            return p;
         }
-        List<Provider> providers = providerRepository.findByStatus("CONNECTED");
+        List<Provider> providers = providerRepository.findByStatus("CONNECTED").stream()
+                .filter(p -> p.getDeletedAt() == null)
+                .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
+                .filter(p -> !providerKeyCipher.decrypt(p.getEncryptedApiKey()).isBlank())
+                .sorted(Comparator.comparing(Provider::getName, String.CASE_INSENSITIVE_ORDER))
+                .toList();
         if (!providers.isEmpty()) {
             Provider p = providers.get(0);
-            log.info("No default provider found for agent {}, using first connected provider {}", agent.getName(), p.getProviderType());
+            log.info("No default provider for agent {}, using first connected provider with a key: {}", agent.getName(), p.getProviderType());
             return p;
         }
-        log.warn("No providers found for agent {}", agent.getName());
+        log.warn("No configured provider found for agent {}, execution will fall back to mock", agent.getName());
         return null;
     }
 
     private LLMProvider resolveLLMProvider(Provider provider) {
         if (provider == null) {
+            log.warn("Resolving mock LLM provider: no configured AI provider available");
             return providerFactory.getFallbackProvider();
         }
         try {
-            String apiKey = provider.getEncryptedApiKey() != null
-                ? new String(provider.getEncryptedApiKey()) : "";
+            String apiKey = providerKeyCipher.decrypt(provider.getEncryptedApiKey());
             return providerFactory.getProvider(provider.getProviderType(), apiKey, provider.getApiEndpoint());
         } catch (Exception e) {
             log.warn("Failed to create provider for type={}, using mock", provider.getProviderType(), e);
             return providerFactory.getFallbackProvider();
         }
+    }
+
+    private String resolveModel(Provider provider, LLMProvider llmProvider) {
+        if (provider != null && provider.getModels() != null && !provider.getModels().isBlank()) {
+            try {
+                List<String> models = objectMapper.readValue(provider.getModels(), new TypeReference<List<String>>() {});
+                if (models != null && !models.isEmpty()) {
+                    return models.get(0);
+                }
+            } catch (Exception ignored) {}
+        }
+        return llmProvider.getDefaultModel();
     }
 
     private List<Skill> getAgentSkills(UUID agentId) {
@@ -262,16 +289,95 @@ public class AgentRuntimeService {
     }
 
     public Map<String, Object> executePromptSync(String systemPrompt, String userMessage) {
-        LLMProvider provider = providerFactory.getFallbackProvider();
-        LLMRequest request = new LLMRequest(systemPrompt, userMessage);
-        LLMResponse response = provider.chat(request);
-        return Map.of(
-            "content", response.getContent(),
-            "model", response.getModel(),
-            "tokens", response.getTotalTokens(),
-            "success", response.isSuccess(),
-            "error", response.getErrorMessage() != null ? response.getErrorMessage() : ""
-        );
+        try {
+            LLMRequest request = new LLMRequest(systemPrompt, userMessage);
+
+            for (Provider provider : resolveProviderChain()) {
+                LLMProvider llmProvider = resolveLLMProvider(provider);
+                if (llmProvider == null || "mock".equals(llmProvider.getName())) {
+                    continue;
+                }
+                request.setModel(resolveModel(provider, llmProvider));
+                LLMResponse response = llmProvider.chat(request);
+                if (response.isSuccess()) {
+                    log.info("executePromptSync succeeded via provider {} model {}", provider.getName(), response.getModel());
+                    return Map.of(
+                        "content", response.getContent(),
+                        "model", response.getModel(),
+                        "tokens", response.getTotalTokens(),
+                        "success", true,
+                        "error", "",
+                        "provider", provider.getName()
+                    );
+                }
+                log.warn("Provider {} failed for sync prompt: {}", provider.getName(), response.getErrorMessage());
+            }
+
+            return Map.of(
+                "content", "",
+                "model", "",
+                "tokens", 0,
+                "success", false,
+                "error", "All providers failed to process the request"
+            );
+        } catch (Exception e) {
+            log.error("executePromptSync error", e);
+            return Map.of(
+                "content", "",
+                "model", "",
+                "tokens", 0,
+                "success", false,
+                "error", e.getMessage() != null ? e.getMessage() : "Unknown error"
+            );
+        }
+    }
+
+    private List<Provider> resolveProviderChain() {
+        List<Provider> result = new ArrayList<>();
+        Set<UUID> seen = new HashSet<>();
+
+        try {
+            Optional<Agent> karmaAi = agentRepository.findByNameContainingIgnoreCase("Karma AI")
+                    .stream().filter(a -> "ACTIVE".equals(a.getStatus())).findFirst();
+            if (karmaAi.isPresent()) {
+                addProviderCandidate(result, seen, karmaAi.get().getDefaultProviderId());
+                addProviderCandidate(result, seen, karmaAi.get().getFallbackProviderId());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to resolve Karma AI default provider", e);
+        }
+
+        for (Provider p : providerRepository.findByStatus("CONNECTED")) {
+            if (p.getDeletedAt() == null
+                    && isLlmProvider(p.getProviderType())
+                    && !providerKeyCipher.decrypt(p.getEncryptedApiKey()).isBlank()
+                    && !seen.contains(p.getId())) {
+                result.add(p);
+                seen.add(p.getId());
+            }
+        }
+        return result;
+    }
+
+    private void addProviderCandidate(List<Provider> result, Set<UUID> seen, UUID providerId) {
+        if (providerId == null || seen.contains(providerId)) return;
+        providerRepository.findById(providerId).ifPresent(p -> {
+            if ("CONNECTED".equals(p.getStatus())
+                    && p.getDeletedAt() == null
+                    && isLlmProvider(p.getProviderType())
+                    && !providerKeyCipher.decrypt(p.getEncryptedApiKey()).isBlank()) {
+                result.add(p);
+                seen.add(p.getId());
+            }
+        });
+    }
+
+    private boolean isLlmProvider(String providerType) {
+        if (providerType == null) return false;
+        String t = providerType.toLowerCase();
+        return t.equals("openai") || t.equals("anthropic") || t.equals("google")
+            || t.equals("gemini") || t.equals("openrouter") || t.equals("opencode")
+            || t.equals("groq");
     }
 
     private BigDecimal calculateCost(String model, int promptTokens, int completionTokens) {

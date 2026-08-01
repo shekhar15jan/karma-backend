@@ -17,6 +17,8 @@ public class ExecutionRequest {
     @NotNull
     private UUID missionId;
 
+    private String mode;
+
     private UUID providerId;
     private String modelUsed;
 }

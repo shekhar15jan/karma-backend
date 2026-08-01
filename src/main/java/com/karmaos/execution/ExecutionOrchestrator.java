@@ -1,5 +1,6 @@
 package com.karmaos.execution;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.agent.AgentRuntimeService;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
@@ -16,6 +17,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -27,6 +30,11 @@ public class ExecutionOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionOrchestrator.class);
 
+    public static final int MAX_STEP_RETRIES = 3;
+    public static final int MAX_FLOW_RESTARTS = 3;
+    public static final String MODE_AUTO = "AUTO";
+    public static final String MODE_REVIEW = "REVIEW";
+
     private final MissionRepository missionRepository;
     private final MissionFlowRepository missionFlowRepository;
     private final FlowRepository flowRepository;
@@ -37,6 +45,7 @@ public class ExecutionOrchestrator {
     private final AgentRuntimeService agentRuntimeService;
     private final MediaOrchestrationService mediaOrchestrationService;
     private final ArtifactRepository artifactRepository;
+    private final ObjectMapper objectMapper;
 
     private final Map<UUID, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -50,7 +59,8 @@ public class ExecutionOrchestrator {
                                  ExecutionService executionService,
                                  AgentRuntimeService agentRuntimeService,
                                  MediaOrchestrationService mediaOrchestrationService,
-                                 ArtifactRepository artifactRepository) {
+                                 ArtifactRepository artifactRepository,
+                                 ObjectMapper objectMapper) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
@@ -61,10 +71,16 @@ public class ExecutionOrchestrator {
         this.agentRuntimeService = agentRuntimeService;
         this.mediaOrchestrationService = mediaOrchestrationService;
         this.artifactRepository = artifactRepository;
+        this.objectMapper = objectMapper;
     }
 
     @Transactional
     public Execution startExecution(UUID missionId) {
+        return startExecution(missionId, MODE_REVIEW);
+    }
+
+    @Transactional
+    public Execution startExecution(UUID missionId, String mode) {
         Mission mission = missionRepository.findById(missionId)
             .orElseThrow(() -> new RuntimeException("Mission not found: " + missionId));
 
@@ -74,108 +90,339 @@ public class ExecutionOrchestrator {
 
         Execution execution = new Execution();
         execution.setMissionId(missionId);
+        if (mode != null && !mode.isBlank()) {
+            execution.setMode(mode.toUpperCase());
+        }
         execution.setStatus("PENDING");
-        execution = executionRepository.save(execution);
-
-        return execution;
+        return executionRepository.save(execution);
     }
 
     public void executeAsync(UUID executionId) {
+        runAsync(executionId, () -> execute(executionId));
+    }
+
+    /**
+     * Starts an execution for a mission and schedules the async run only after the
+     * surrounding transaction commits, so the runner can always find the execution row.
+     */
+    @Transactional
+    public Execution startExecutionAfterCommit(UUID missionId) {
+        return startExecutionAfterCommit(missionId, MODE_REVIEW);
+    }
+
+    @Transactional
+    public Execution startExecutionAfterCommit(UUID missionId, String mode) {
+        Execution execution = startExecution(missionId, mode);
+        scheduleAsync(execution.getId());
+        return execution;
+    }
+
+    private void scheduleAsync(UUID executionId) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    executeAsync(executionId);
+                }
+            });
+        } else {
+            executeAsync(executionId);
+        }
+    }
+
+    private void runAsync(UUID executionId, Runnable task) {
         CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
             try {
-                execute(executionId);
+                task.run();
             } catch (Exception e) {
-                log.error("Execution {} failed", executionId, e);
-                executionService.complete(executionId, "FAILED", e.getMessage());
+                log.error("Async execution {} failed", executionId, e);
+                try {
+                    executionService.complete(executionId, "FAILED", e.getMessage());
+                } catch (Exception ex) {
+                    log.error("Failed to mark execution {} FAILED", executionId, ex);
+                }
+                executionRepository.findById(executionId)
+                        .ifPresent(ex -> updateMissionStatus(ex.getMissionId(), "FAILED"));
             }
         }, executor);
-
         activeExecutions.put(executionId, future);
     }
 
     public void execute(UUID executionId) {
         Execution execution = executionRepository.findById(executionId)
             .orElseThrow(() -> new RuntimeException("Execution not found: " + executionId));
-
         executionService.start(executionId);
+        runFrom(execution);
+    }
 
+    public void resumeExecution(UUID executionId) {
+        Execution execution = executionRepository.findById(executionId).orElse(null);
+        if (execution == null) {
+            log.warn("Cannot resume unknown execution {}", executionId);
+            return;
+        }
+        executionService.start(executionId);
+        updateMissionStatus(execution.getMissionId(), "RUNNING");
+        runAsync(executionId, () -> runFrom(execution));
+    }
+
+    public void regenerateStep(UUID stepId, String feedback) {
+        ExecutionStep step = stepRepository.findById(stepId).orElse(null);
+        if (step == null) {
+            log.warn("Cannot regenerate unknown step {}", stepId);
+            return;
+        }
+        Execution execution = executionRepository.findById(step.getExecutionId()).orElse(null);
+        if (execution == null) {
+            log.warn("Cannot regenerate step {} for unknown execution {}", stepId, step.getExecutionId());
+            return;
+        }
+
+        stepRepository.flush();
+        int rejected = countRejectedAttempts(step.getExecutionId(), step.getStepOrder());
+        if (rejected >= MAX_STEP_RETRIES) {
+            log.warn("Step {} rejected {} times; max retries ({}) exceeded", stepId, rejected, MAX_STEP_RETRIES);
+            executionService.complete(execution.getId(), "FAILED",
+                "Step rejected " + rejected + " times; max retries (" + MAX_STEP_RETRIES + ") exceeded");
+            updateMissionStatus(execution.getMissionId(), "FAILED");
+            return;
+        }
+
+        UUID executionId = execution.getId();
+        UUID missionId = execution.getMissionId();
+        int stepOrder = step.getStepOrder();
+        StepPlan plan = fromStep(step);
+        int retryCount = rejected;
+
+        runAsync(executionId, () -> {
+            try {
+                Meta meta = readMeta(execution);
+                ExecutionStep rerun = runStep(executionId, plan, stepOrder, meta.previousOutput, feedback, missionId);
+                if (!"COMPLETED".equals(rerun.getStatus())) {
+                    executionService.complete(executionId, "FAILED",
+                        "Regeneration failed: " + rerun.getErrorMessage());
+                    updateMissionStatus(missionId, "FAILED");
+                    return;
+                }
+                rerun.setRetryCount(retryCount);
+                rerun.setReviewStatus("PENDING_REVIEW");
+                stepRepository.save(rerun);
+                meta.previousOutput = rerun.getOutputData();
+                meta.resumeIndex = stepOrder + 1;
+                saveMeta(execution, meta);
+                executionService.pause(executionId);
+                updateMissionStatus(missionId, "WAITING");
+                log.info("Step {} regenerated (attempt {}), execution {} awaiting review", stepId, retryCount, executionId);
+            } catch (Exception e) {
+                log.error("Regeneration failed for step {}", stepId, e);
+                executionService.complete(executionId, "FAILED", e.getMessage());
+                updateMissionStatus(missionId, "FAILED");
+            }
+        });
+    }
+
+    public void restartFlow(UUID missionId, String feedback) {
+        Optional<Execution> latestOpt = executionRepository.findFirstByMissionIdOrderByCreatedAtDesc(missionId);
+        int restartCount = 0;
+        String mode = MODE_REVIEW;
+        if (latestOpt.isPresent()) {
+            restartCount = readMeta(latestOpt.get()).restartCount;
+            String latestMode = latestOpt.get().getMode();
+            if (latestMode != null && !latestMode.isBlank()) {
+                mode = latestMode;
+            }
+        }
+
+        if (restartCount >= MAX_FLOW_RESTARTS) {
+            int exceeded = restartCount;
+            log.warn("Mission {} flow rejected {} times; max restarts ({}) exceeded", missionId, exceeded, MAX_FLOW_RESTARTS);
+            updateMissionStatus(missionId, "FAILED");
+            latestOpt.ifPresent(e -> executionService.complete(e.getId(), "FAILED",
+                "Flow rejected " + exceeded + " times; max restarts (" + MAX_FLOW_RESTARTS + ") exceeded"));
+            return;
+        }
+
+        Execution execution = new Execution();
+        execution.setMissionId(missionId);
+        execution.setMode(mode);
+        execution.setStatus("PENDING");
+        Meta meta = new Meta();
+        meta.feedback = feedback;
+        meta.restartCount = restartCount + 1;
+        execution.setMetadata(toMetaJson(meta));
+        execution = executionRepository.save(execution);
+
+        latestOpt.ifPresent(e -> executionService.markRestarted(e.getId()));
+        updateMissionStatus(missionId, "RUNNING");
+        log.info("Restarting flow for mission {} (restart #{}, mode {})", missionId, restartCount + 1, mode);
+
+        UUID newExecutionId = execution.getId();
+        // The parent transaction (ReviewService.create) must commit before the new execution row
+        // is visible to the async runner; otherwise it cannot find the execution and stays PENDING.
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    executeAsync(newExecutionId);
+                }
+            });
+        } else {
+            executeAsync(newExecutionId);
+        }
+    }
+
+    public void onArtifactApproved(UUID artifactId) {
+        log.info("Artifact {} approved for publishing", artifactId);
+    }
+
+    public void onArtifactRejected(UUID artifactId, String feedback) {
+        Artifact artifact = artifactRepository.findById(artifactId).orElse(null);
+        if (artifact == null) {
+            log.warn("Cannot restart flow for unknown artifact {}", artifactId);
+            return;
+        }
+        restartFlow(artifact.getMissionId(), feedback);
+    }
+
+    private void runFrom(Execution execution) {
+        UUID executionId = execution.getId();
         UUID missionId = execution.getMissionId();
         List<MissionFlow> missionFlows = missionFlowRepository.findByIdMissionId(missionId);
 
         if (missionFlows.isEmpty()) {
             log.warn("No flows configured for mission {}", missionId);
-            executionService.complete(executionId, "COMPLETED", null);
+            executionService.complete(executionId, "FAILED", "No flows configured for mission: " + missionId);
+            updateMissionStatus(missionId, "FAILED");
             return;
         }
-
         missionFlows.sort(Comparator.comparingInt(MissionFlow::getExecOrder));
+        PlanHolder holder = buildPlan(missionFlows);
+        if (holder.steps.isEmpty()) {
+            log.warn("No executable steps for mission {} (no agents assigned to its flows)", missionId);
+            executionService.complete(executionId, "FAILED", "No executable steps: no agents assigned to the mission's flows");
+            updateMissionStatus(missionId, "FAILED");
+            return;
+        }
+        String mode = execution.getMode() != null ? execution.getMode() : MODE_REVIEW;
+        Meta meta = readMeta(execution);
+        int startIndex = meta.resumeIndex;
+        String previousOutput = meta.previousOutput != null ? meta.previousOutput : meta.feedback;
+        int totalSteps = holder.steps.size();
 
         try {
-            String previousOutput = null;
-            int globalStepOrder = 0;
-            Set<UUID> mediaFlows = new HashSet<>();
+            for (int i = startIndex; i < holder.steps.size(); i++) {
+                StepPlan sp = holder.steps.get(i);
+                ExecutionStep step = runStep(executionId, sp, i, previousOutput, null, missionId);
 
-            for (MissionFlow mf : missionFlows) {
-                UUID flowId = mf.getId().getFlowId();
-                Flow flow = flowRepository.findById(flowId).orElse(null);
-                if (flow == null) continue;
-
-                List<FlowAgent> flowAgents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
-                if (flowAgents.isEmpty()) {
-                    log.warn("No agents assigned to flow {}", flowId);
-                    continue;
+                if (!"COMPLETED".equals(step.getStatus())) {
+                    executionService.complete(executionId, "FAILED",
+                        "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage());
+                    updateMissionStatus(missionId, "FAILED");
+                    return;
                 }
 
-                String category = flow.getCategory() != null ? flow.getCategory() : "";
-                String flowName = flow.getName() != null ? flow.getName().toLowerCase() : "";
+                previousOutput = step.getOutputData();
+                updateMissionProgress(missionId,
+                        totalSteps > 0 ? (int) Math.round(((i + 1) * 100.0) / totalSteps) : 100);
 
-                for (FlowAgent fa : flowAgents) {
-                    UUID agentId = fa.getId().getAgentId();
-                    ExecutionStep step;
-
-                    if ("PUBLISHING".equals(category)) {
-                        step = mediaOrchestrationService.executePublishStep(
-                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
-                        mediaFlows.add(flowId);
-                    } else if ("MEDIA".equals(category) && (flowName.contains("image") || flowName.contains("thumbnail"))) {
-                        step = mediaOrchestrationService.executeImageStep(
-                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
-                        mediaFlows.add(flowId);
-                    } else if ("MEDIA".equals(category) && (flowName.contains("voice") || flowName.contains("audio"))) {
-                        step = mediaOrchestrationService.executeVoiceStep(
-                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
-                        mediaFlows.add(flowId);
-                    } else if ("MEDIA".equals(category) && (flowName.contains("video"))) {
-                        step = mediaOrchestrationService.executeVideoStep(
-                            executionId, flowId, agentId, globalStepOrder++, previousOutput, missionId);
-                        mediaFlows.add(flowId);
-                    } else {
-                        step = agentRuntimeService.executeAgentStep(
-                            executionId, flowId, agentId, globalStepOrder++,
-                            previousOutput, missionId);
-                    }
-
-                    if ("COMPLETED".equals(step.getStatus())) {
-                        previousOutput = step.getOutputData();
-                    } else {
-                        executionService.complete(executionId, "FAILED",
-                            "Step failed: flow=" + flowId + " agent=" + agentId + " error=" + step.getErrorMessage());
-                        updateMissionStatus(missionId, "FAILED");
-                        return;
-                    }
+                if (MODE_REVIEW.equals(mode)) {
+                    step.setReviewStatus("PENDING_REVIEW");
+                    stepRepository.save(step);
+                    meta.resumeIndex = i + 1;
+                    meta.previousOutput = previousOutput;
+                    saveMeta(execution, meta);
+                    executionService.pause(executionId);
+                    updateMissionStatus(missionId, "WAITING");
+                    log.info("Execution {} paused at step index {} awaiting review", executionId, i);
+                    return;
                 }
             }
 
-            createArtifactsFromOutput(execution, missionFlows, previousOutput, mediaFlows);
-
+            createArtifactsFromOutput(execution, missionFlows, previousOutput, holder.mediaFlows);
             executionService.complete(executionId, "COMPLETED", null);
             updateMissionStatus(missionId, "COMPLETED");
-
         } catch (Exception e) {
             log.error("Execution {} failed with exception", executionId, e);
             executionService.complete(executionId, "FAILED", e.getMessage());
             updateMissionStatus(missionId, "FAILED");
         }
+    }
+
+    private ExecutionStep runStep(UUID executionId, StepPlan sp, int stepOrder, String previousOutput,
+                                  String reviewerFeedback, UUID missionId) {
+        return switch (sp.kind) {
+            case "PUBLISH" -> mediaOrchestrationService.executePublishStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId);
+            case "IMAGE" -> mediaOrchestrationService.executeImageStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+            case "VOICE" -> mediaOrchestrationService.executeVoiceStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+            case "VIDEO" -> mediaOrchestrationService.executeVideoStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+            default -> agentRuntimeService.executeAgentStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+        };
+    }
+
+    private PlanHolder buildPlan(List<MissionFlow> missionFlows) {
+        List<StepPlan> steps = new ArrayList<>();
+        Set<UUID> mediaFlows = new HashSet<>();
+
+        for (MissionFlow mf : missionFlows) {
+            UUID flowId = mf.getId().getFlowId();
+            Flow flow = flowRepository.findByIdAndStatus(flowId, "ACTIVE").orElse(null);
+            if (flow == null) {
+                log.warn("Flow {} not found or inactive; skipping in plan", flowId);
+                continue;
+            }
+
+            List<FlowAgent> flowAgents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
+            if (flowAgents.isEmpty()) {
+                log.warn("No agents assigned to flow {}", flowId);
+                continue;
+            }
+
+            String category = flow.getCategory() != null ? flow.getCategory() : "";
+            String flowName = flow.getName() != null ? flow.getName().toLowerCase() : "";
+
+            for (FlowAgent fa : flowAgents) {
+                String kind;
+                if ("PUBLISHING".equals(category)) {
+                    kind = "PUBLISH";
+                    mediaFlows.add(flowId);
+                } else if ("MEDIA".equals(category) && (flowName.contains("image") || flowName.contains("thumbnail"))) {
+                    kind = "IMAGE";
+                    mediaFlows.add(flowId);
+                } else if ("MEDIA".equals(category) && (flowName.contains("voice") || flowName.contains("audio"))) {
+                    kind = "VOICE";
+                    mediaFlows.add(flowId);
+                } else if ("MEDIA".equals(category) && flowName.contains("video")) {
+                    kind = "VIDEO";
+                    mediaFlows.add(flowId);
+                } else {
+                    kind = "LLM";
+                }
+                steps.add(new StepPlan(flowId, fa.getId().getAgentId(), kind));
+            }
+        }
+        return new PlanHolder(steps, mediaFlows);
+    }
+
+    private StepPlan fromStep(ExecutionStep step) {
+        return new StepPlan(step.getFlowId(), step.getAgentId(),
+            switch (step.getStepType() != null ? step.getStepType() : "") {
+                case "PUBLISH" -> "PUBLISH";
+                case "IMAGE_GENERATION" -> "IMAGE";
+                case "TTS" -> "VOICE";
+                case "VIDEO_GENERATION" -> "VIDEO";
+                default -> "LLM";
+            });
+    }
+
+    private int countRejectedAttempts(UUID executionId, int stepOrder) {
+        return (int) stepRepository.findByExecutionIdOrderByStepOrder(executionId).stream()
+            .filter(s -> s.getStepOrder() == stepOrder && "REJECTED".equals(s.getReviewStatus()))
+            .count();
     }
 
     private void createArtifactsFromOutput(Execution execution, List<MissionFlow> missionFlows,
@@ -187,7 +434,7 @@ public class ExecutionOrchestrator {
             UUID flowId = mf.getId().getFlowId();
             if (mediaFlows.contains(flowId)) continue;
 
-            Flow flow = flowRepository.findById(flowId).orElse(null);
+            Flow flow = flowRepository.findByIdAndStatus(flowId, "ACTIVE").orElse(null);
             if (flow == null) continue;
 
             List<FlowAgent> agents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
@@ -247,7 +494,72 @@ public class ExecutionOrchestrator {
             if ("COMPLETED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status)) {
                 mission.setCompletedAt(LocalDateTime.now());
             }
+            if ("COMPLETED".equals(status)) {
+                mission.setProgress(100);
+            }
             missionRepository.save(mission);
         });
+    }
+
+    private void updateMissionProgress(UUID missionId, int progress) {
+        missionRepository.findById(missionId).ifPresent(mission -> {
+            mission.setProgress(progress);
+            missionRepository.save(mission);
+        });
+    }
+
+    private Meta readMeta(Execution execution) {
+        if (execution.getMetadata() == null || execution.getMetadata().isBlank()) {
+            return new Meta();
+        }
+        try {
+            return objectMapper.readValue(execution.getMetadata(), Meta.class);
+        } catch (Exception e) {
+            log.warn("Failed to parse execution metadata for {}: {}", execution.getId(), e.getMessage());
+            return new Meta();
+        }
+    }
+
+    private String toMetaJson(Meta meta) {
+        try {
+            return objectMapper.writeValueAsString(meta);
+        } catch (Exception e) {
+            log.warn("Failed to serialize execution metadata: {}", e.getMessage());
+            return "{}";
+        }
+    }
+
+    private void saveMeta(Execution execution, Meta meta) {
+        execution.setMetadata(toMetaJson(meta));
+        executionRepository.save(execution);
+    }
+
+    private static class Meta {
+        public int resumeIndex = 0;
+        public String previousOutput;
+        public String feedback;
+        public int restartCount = 0;
+    }
+
+    private static class StepPlan {
+        final UUID flowId;
+        final UUID agentId;
+        final String kind;
+
+        StepPlan(UUID flowId, UUID agentId, String kind) {
+            this.flowId = flowId;
+            this.agentId = agentId;
+            this.kind = kind;
+        }
+    }
+
+    private static class PlanHolder {
+        final List<StepPlan> steps;
+        final Set<UUID> mediaFlows;
+
+        PlanHolder(List<StepPlan> steps, Set<UUID> mediaFlows) {
+            this.steps = steps;
+            this.mediaFlows = mediaFlows;
+        }
     }
 }

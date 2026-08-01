@@ -38,12 +38,17 @@ public class LLMProviderFactory {
         return getProvider(providerType, null, null);
     }
 
+    public void evictAll() {
+        providerCache.clear();
+    }
+
     private LLMProvider createProvider(String providerType, String apiKey, String apiEndpoint) {
         String type = providerType.toLowerCase();
         return switch (type) {
             case "openai"      -> new OpenAiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "anthropic"   -> new AnthropicProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "gemini"      -> new GeminiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
+            case "google"      -> new GeminiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "openrouter"  -> new OpenRouterProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "opencode"    -> new OpenCodeProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper, apiEndpoint);
             case "groq"        -> new GroqProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
