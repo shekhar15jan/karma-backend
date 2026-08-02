@@ -1,7 +1,10 @@
 package com.karmaos.workspace;
 
+import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ErrorCode;
+import com.karmaos.mission.Mission;
+import com.karmaos.mission.MissionRepository;
 import com.karmaos.project.ProjectRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -16,13 +19,19 @@ public class WorkspaceService {
 
     private final WorkspaceRepository workspaceRepository;
     private final ProjectRepository projectRepository;
+    private final MissionRepository missionRepository;
+    private final ArtifactRepository artifactRepository;
     private final int maxWorkspacesPerUser;
 
     public WorkspaceService(WorkspaceRepository workspaceRepository,
                             ProjectRepository projectRepository,
+                            MissionRepository missionRepository,
+                            ArtifactRepository artifactRepository,
                             @Value("${app.workspace.max-per-user:10}") int maxWorkspacesPerUser) {
         this.workspaceRepository = workspaceRepository;
         this.projectRepository = projectRepository;
+        this.missionRepository = missionRepository;
+        this.artifactRepository = artifactRepository;
         this.maxWorkspacesPerUser = maxWorkspacesPerUser;
     }
 
@@ -86,12 +95,26 @@ public class WorkspaceService {
     }
 
     private WorkspaceResponse toResponse(Workspace w) {
+        List<UUID> projectIds = projectRepository.findByWorkspaceIdAndStatus(w.getId(), "ACTIVE")
+                .stream()
+                .map(p -> p.getId())
+                .collect(Collectors.toList());
+        List<UUID> missionIds = projectIds.isEmpty()
+                ? List.of()
+                : missionRepository.findByProjectIdInAndStatusNot(projectIds, "DELETED")
+                        .stream()
+                        .map(Mission::getId)
+                        .collect(Collectors.toList());
+
         return WorkspaceResponse.builder()
                 .id(w.getId())
                 .name(w.getName())
                 .description(w.getDescription())
                 .ownerId(w.getOwnerId())
                 .status(w.getStatus())
+                .projectCount(projectIds.size())
+                .missionCount(missionIds.size())
+                .artifactCount(missionIds.isEmpty() ? 0 : artifactRepository.countByMissionIdIn(missionIds))
                 .createdAt(w.getCreatedAt())
                 .updatedAt(w.getUpdatedAt())
                 .build();

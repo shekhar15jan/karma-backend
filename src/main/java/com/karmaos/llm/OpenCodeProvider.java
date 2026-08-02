@@ -96,11 +96,26 @@ public class OpenCodeProvider implements LLMProvider {
                 return LLMResponse.error("Empty response from OpenCode");
             }
 
+            if (response.hasNonNull("error")) {
+                String errMsg = response.get("error").path("message").asText("OpenCode error");
+                log.warn("OpenCode returned error: {}", errMsg);
+                return LLMResponse.error(errMsg);
+            }
+
             JsonNode choice = response.get("choices").get(0);
             String content = choice.get("message").get("content").asText();
+            if (content.isBlank() && choice.get("message").hasNonNull("reasoning_content")) {
+                content = choice.get("message").get("reasoning_content").asText();
+            }
             JsonNode usage = response.get("usage");
             int promptTokens = usage != null ? usage.get("prompt_tokens").asInt() : 0;
             int completionTokens = usage != null ? usage.get("completion_tokens").asInt() : 0;
+
+            if (content.isBlank()) {
+                log.warn("OpenCode returned empty content (usage={} prompt, {} completion). Raw: {}",
+                        promptTokens, completionTokens, response.toString());
+                return LLMResponse.error("Empty content returned by OpenCode model " + model);
+            }
 
             return LLMResponse.ok(content, model, promptTokens, completionTokens, elapsed);
 

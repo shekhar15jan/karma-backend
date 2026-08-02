@@ -212,6 +212,20 @@ public class WorkflowService {
                 .collect(Collectors.toList());
     }
 
+    public List<WorkflowDefinition> listAllDefinitions(UUID userId) {
+        return definitionRepository.findAllByOrderByCreatedAtDesc();
+    }
+
+    @Transactional
+    public void deleteDefinition(UUID id, UUID userId) {
+        WorkflowDefinition def = definitionRepository.findById(id)
+                .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "Workflow not found: " + id));
+        if (def.getProjectId() != null) {
+            ownershipService.getOwnedProject(userId, def.getProjectId());
+        }
+        definitionRepository.delete(def);
+    }
+
     private WorkflowRunResponse toResponse(WorkflowRun r) {
         return WorkflowRunResponse.builder()
                 .id(r.getId())

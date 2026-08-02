@@ -10,6 +10,12 @@ import com.karmaos.execution.ExecutionOrchestrator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -49,6 +55,90 @@ public class ArtifactService {
     public ArtifactResponse getById(UUID id, UserPrincipal user) {
         return toResponse(ownershipService.getOwnedArtifact(user.getId(), id));
     }
+
+    public ArtifactContent loadContent(UUID id, UserPrincipal user) {
+        Artifact artifact = ownershipService.getOwnedArtifact(user.getId(), id);
+        return resolveContent(artifact);
+    }
+
+    private ArtifactContent resolveContent(Artifact artifact) {
+        byte[] bytes = null;
+        String contentType = artifact.getContentType();
+
+        String location = artifact.getStorageLocation();
+        if (location == null || location.isBlank()) {
+            location = artifact.getContentText();
+        }
+
+        if (location != null && !location.isBlank()) {
+            if (location.startsWith("data:")) {
+                int comma = location.indexOf(',');
+                if (comma >= 0) {
+                    String header = location.substring(0, comma);
+                    String base64 = location.substring(comma + 1);
+                    try {
+                        bytes = Base64.getDecoder().decode(base64);
+                        if (header.contains(";")) {
+                            String declared = header.substring(5, header.indexOf(';'));
+                            if (!declared.isBlank()) contentType = declared;
+                        }
+                    } catch (IllegalArgumentException e) {
+                        bytes = null;
+                    }
+                }
+            } else if (location.startsWith("file:")) {
+                try {
+                    Path path = Path.of(URI.create(location));
+                    bytes = Files.readAllBytes(path);
+                } catch (IOException e) {
+                    bytes = null;
+                }
+            }
+        }
+
+        if (bytes == null) {
+            String text = artifact.getContentText();
+            bytes = text != null ? text.getBytes(StandardCharsets.UTF_8) : new byte[0];
+            String fallback = "text/markdown";
+            if (contentType != null && !contentType.isBlank()
+                    && !contentType.toLowerCase().startsWith("text/")) {
+                fallback = "text/plain";
+            }
+            contentType = fallback;
+        }
+
+        String filename = artifact.getName();
+        String extension = extensionFor(contentType);
+        if (filename == null || filename.isBlank()) {
+            filename = artifact.getId() != null ? artifact.getId().toString() : "artifact";
+        }
+        if (!filename.toLowerCase().endsWith("." + extension)) {
+            filename = filename + "." + extension;
+        }
+
+        return new ArtifactContent(bytes, contentType, filename);
+    }
+
+    private String extensionFor(String contentType) {
+        if (contentType == null) return "bin";
+        switch (contentType.toLowerCase()) {
+            case "video/mp4": return "mp4";
+            case "video/webm": return "webm";
+            case "audio/mpeg": return "mp3";
+            case "audio/wav": return "wav";
+            case "audio/ogg": return "ogg";
+            case "image/png": return "png";
+            case "image/jpeg": return "jpg";
+            case "image/webp": return "webp";
+            case "application/json": return "json";
+            case "text/html": return "html";
+            case "text/plain": return "txt";
+            case "text/csv": return "csv";
+            default: return "md";
+        }
+    }
+
+    public record ArtifactContent(byte[] bytes, String contentType, String filename) {}
 
     public List<ArtifactResponse> listPendingReview(UUID userId) {
         return artifactRepository.findByMissionIdInOrderByCreatedAtDesc(ownershipService.getOwnedMissionIds(userId))
@@ -91,6 +181,7 @@ public class ArtifactService {
                 .status(a.getStatus())
                 .contentText(a.getContentText())
                 .contentType(a.getContentType())
+                .storageLocation(a.getStorageLocation())
                 .reviewStatus(a.getReviewStatus())
                 .publicationStatus(a.getPublicationStatus())
                 .tags(tags)

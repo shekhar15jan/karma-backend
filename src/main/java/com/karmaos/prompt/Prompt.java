@@ -35,9 +35,6 @@ public class Prompt extends BaseEntity {
     @Column(columnDefinition = "JSONB DEFAULT '[]'::jsonb")
     private String variables = "[]";
 
-    @Column(nullable = false, length = 50)
-    private String status = "DRAFT";
-
     @Column(name = "default_provider_id")
     private UUID defaultProviderId;
 

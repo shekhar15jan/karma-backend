@@ -24,7 +24,7 @@ public class PromptRequest {
 
     private String category;
 
-    @NotBlank
+    @Size(max = 2000)
     private String content;
 
     private List<String> variables;

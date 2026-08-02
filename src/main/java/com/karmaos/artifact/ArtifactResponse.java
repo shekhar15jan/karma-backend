@@ -23,6 +23,7 @@ public class ArtifactResponse {
     private String status;
     private String contentText;
     private String contentType;
+    private String storageLocation;
     private String reviewStatus;
     private String publicationStatus;
     private List<String> tags;

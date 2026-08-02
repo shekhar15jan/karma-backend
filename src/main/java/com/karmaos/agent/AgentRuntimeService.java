@@ -10,6 +10,8 @@ import com.karmaos.llm.LLMProvider;
 import com.karmaos.llm.LLMProviderFactory;
 import com.karmaos.llm.LLMRequest;
 import com.karmaos.llm.LLMResponse;
+import com.karmaos.mission.Mission;
+import com.karmaos.mission.MissionRepository;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
@@ -56,6 +58,7 @@ public class AgentRuntimeService {
     private final AgentRepository agentRepository;
     private final SourceDocumentRepository sourceDocumentRepository;
     private final ExecutionService executionService;
+    private final MissionRepository missionRepository;
     private final ObjectMapper objectMapper;
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
@@ -68,6 +71,7 @@ public class AgentRuntimeService {
                                AgentRepository agentRepository,
                                SourceDocumentRepository sourceDocumentRepository,
                                ExecutionService executionService,
+                               MissionRepository missionRepository,
                                ObjectMapper objectMapper) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
@@ -79,6 +83,7 @@ public class AgentRuntimeService {
         this.agentRepository = agentRepository;
         this.sourceDocumentRepository = sourceDocumentRepository;
         this.executionService = executionService;
+        this.missionRepository = missionRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -101,35 +106,16 @@ public class AgentRuntimeService {
                 throw new RuntimeException("Agent not found: " + agentId);
             }
 
+            String distilledContext = StepContextDistiller.distill(contextData);
             String systemPrompt = buildSystemPrompt(agent, flow, missionId);
-            String userMessage = buildUserMessage(agent, contextData, missionId, reviewerFeedback);
+            String userMessage = buildUserMessage(agent, distilledContext, missionId, reviewerFeedback);
 
-            Provider provider = resolveProvider(agent);
-            LLMProvider llmProvider = resolveLLMProvider(provider);
+            Provider primaryProvider = resolveProvider(agent);
+            step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
 
-            String modelUsed = resolveModel(provider, llmProvider);
-            step.setProviderId(provider != null ? provider.getId() : null);
-            step.setModelUsed(modelUsed);
-            step.setPromptUsed(systemPrompt + "\n\n" + userMessage);
-
-            LLMRequest request = new LLMRequest(systemPrompt, userMessage);
-            request.setModel(modelUsed);
-            request.setTemperature(resolveTemperature(agent));
-
-            LLMResponse response = llmProvider.chat(request);
-
-            if (!response.isSuccess() && agent.getFallbackProviderId() != null) {
-                log.warn("Primary provider {} failed, trying fallback provider {}", provider != null ? provider.getName() : "none", agent.getFallbackProviderId());
-                provider = providerRepository.findById(agent.getFallbackProviderId()).orElse(null);
-                llmProvider = resolveLLMProvider(provider);
-                if (llmProvider != null && !llmProvider.getName().equals("mock")) {
-                    modelUsed = resolveModel(provider, llmProvider);
-                    request.setModel(modelUsed);
-                    step.setProviderId(provider != null ? provider.getId() : null);
-                    step.setModelUsed(modelUsed);
-                    response = llmProvider.chat(request);
-                }
-            }
+            LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
+                    systemPrompt, userMessage, missionId);
+            String modelUsed = step.getModelUsed();
 
             step.setPromptTokens(response.getPromptTokens());
             step.setCompletionTokens(response.getCompletionTokens());
@@ -154,8 +140,98 @@ public class AgentRuntimeService {
         return executionService.saveStep(executionId, step);
     }
 
+    /**
+     * Runs the LLM call with up to MAX_ATTEMPTS attempts, each time trying the
+     * primary provider first and the agent's fallback provider second. The prompt
+     * is augmented with a corrective instruction after a failed/empty attempt, so
+     * the model gets a chance to produce a valid, non-stub response.
+     */
+    private LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
+                                                    String systemPrompt, String userMessage, UUID missionId) {
+        final int maxAttempts = 3;
+        LLMResponse lastResponse = null;
+        String correctiveHint = "";
+
+        Provider[] chain;
+        Provider fallback = agent != null && agent.getFallbackProviderId() != null
+            ? providerRepository.findById(agent.getFallbackProviderId()).orElse(null)
+            : null;
+        if (primaryProvider != null && fallback != null && !primaryProvider.getId().equals(fallback.getId())) {
+            chain = new Provider[] { primaryProvider, fallback };
+        } else if (primaryProvider != null) {
+            chain = new Provider[] { primaryProvider };
+        } else {
+            chain = new Provider[0];
+        }
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            for (Provider provider : chain) {
+                LLMProvider llmProvider = resolveLLMProvider(provider);
+                if (llmProvider == null || "mock".equals(llmProvider.getName())) {
+                    continue;
+                }
+                String modelUsed = resolveModel(provider, llmProvider);
+                LLMRequest request = new LLMRequest(systemPrompt, userMessage + correctiveHint);
+                request.setModel(modelUsed);
+                request.setTemperature(resolveTemperature(agent));
+                request.setMaxTokens(12000);
+
+                step.setProviderId(provider.getId());
+                step.setModelUsed(modelUsed);
+                step.setPromptUsed(systemPrompt + "\n\n" + userMessage + correctiveHint);
+
+                lastResponse = llmProvider.chat(request);
+
+                if (lastResponse.isSuccess() && StepContextDistiller.isValidOutput(lastResponse.getContent())) {
+                    if (attempt > 1 || provider != primaryProvider) {
+                        log.info("Agent {} produced valid output on attempt {}/{} via provider {}",
+                                agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName());
+                    }
+                    return lastResponse;
+                }
+
+                String reason = lastResponse.isSuccess()
+                    ? "output was empty, too short, or a stub: " + truncate(lastResponse.getContent(), 160)
+                    : "provider error: " + lastResponse.getErrorMessage();
+                log.warn("Agent {} attempt {}/{} via provider {} failed: {}",
+                        agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName(), reason);
+
+                if (attempt >= maxAttempts) {
+                    continue;
+                }
+            }
+
+            if (attempt < maxAttempts) {
+                correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was invalid (empty, too short, " +
+                    "or it just stated that you lacked source material). Do NOT say you have no context or no " +
+                    "source material. Produce complete, substantive, well-structured content for the requested " +
+                    "deliverable using the mission topic provided. Respond with the full deliverable only.";
+            }
+        }
+
+        if (lastResponse == null) {
+            log.warn("No usable provider for agent {}; returning error", agent != null ? agent.getName() : "?");
+            return LLMResponse.error("No usable LLM provider available");
+        }
+        return lastResponse;
+    }
+
+    private String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
     private String buildSystemPrompt(Agent agent, Flow flow, UUID missionId) {
         StringBuilder sb = new StringBuilder();
+
+        Mission mission = missionId != null ? missionRepository.findById(missionId).orElse(null) : null;
+        if (mission != null) {
+            sb.append("Mission topic: ").append(mission.getName() != null ? mission.getName() : "Untitled").append("\n");
+            if (mission.getDescription() != null && !mission.getDescription().isBlank()) {
+                sb.append("Mission brief: ").append(mission.getDescription()).append("\n");
+            }
+            sb.append("Mission type: ").append(mission.getMissionType() != null ? mission.getMissionType() : "GENERAL").append("\n\n");
+        }
 
         if (agent != null && agent.getDefaultPromptId() != null) {
             Prompt prompt = promptRepository.findById(agent.getDefaultPromptId()).orElse(null);
@@ -188,11 +264,27 @@ public class AgentRuntimeService {
     private String buildUserMessage(Agent agent, String contextData, UUID missionId, String reviewerFeedback) {
         StringBuilder sb = new StringBuilder();
 
-        if (contextData != null && !contextData.isEmpty()) {
+        Mission mission = missionId != null ? missionRepository.findById(missionId).orElse(null) : null;
+        String missionTopic = mission != null
+            ? "Mission topic: " + (mission.getName() != null ? mission.getName() : "")
+              + (mission.getDescription() != null && !mission.getDescription().isBlank()
+                    ? " - " + mission.getDescription() : "")
+            : "";
+
+        boolean hasContext = contextData != null && !contextData.isBlank();
+        if (hasContext) {
             sb.append("Context from previous steps:\n").append(contextData).append("\n\n");
         }
 
-        List<SourceDocument> docs = sourceDocumentRepository.findByMissionId(missionId);
+        if (!hasContext && missionTopic.isBlank()) {
+            sb.append("No upstream context was provided and no mission topic is available.\n")
+              .append("Produce your best possible output based on your role description alone.\n\n");
+        } else if (!hasContext) {
+            sb.append("Work from the mission topic directly (no upstream step produced context):\n")
+              .append(missionTopic).append("\n\n");
+        }
+
+        List<SourceDocument> docs = missionId != null ? sourceDocumentRepository.findByMissionId(missionId) : List.of();
         if (!docs.isEmpty()) {
             sb.append("Source documents for this mission:\n");
             for (SourceDocument doc : docs) {

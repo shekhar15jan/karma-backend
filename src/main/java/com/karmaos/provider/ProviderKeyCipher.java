@@ -48,6 +48,10 @@ public class ProviderKeyCipher {
         }
     }
 
+    public boolean isEncrypted(byte[] stored) {
+        return stored != null && stored.length > 0 && stored[0] == FORMAT_MAGIC;
+    }
+
     public String decrypt(byte[] stored) {
         if (stored == null || stored.length == 0) {
             return "";

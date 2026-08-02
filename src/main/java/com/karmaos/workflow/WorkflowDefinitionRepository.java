@@ -10,4 +10,6 @@ import java.util.UUID;
 public interface WorkflowDefinitionRepository extends JpaRepository<WorkflowDefinition, UUID> {
 
     List<WorkflowDefinition> findByProjectIdOrderByCreatedAtDesc(UUID projectId);
+
+    List<WorkflowDefinition> findAllByOrderByCreatedAtDesc();
 }

@@ -1,6 +1,8 @@
 package com.karmaos.execution;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.karmaos.agent.Agent;
+import com.karmaos.agent.AgentRepository;
 import com.karmaos.agent.AgentRuntimeService;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
@@ -41,6 +43,7 @@ public class ExecutionOrchestrator {
     private final MissionFlowRepository missionFlowRepository;
     private final FlowRepository flowRepository;
     private final FlowAgentRepository flowAgentRepository;
+    private final AgentRepository agentRepository;
     private final ExecutionRepository executionRepository;
     private final ExecutionStepRepository stepRepository;
     private final ExecutionService executionService;
@@ -58,6 +61,7 @@ public class ExecutionOrchestrator {
                                  MissionFlowRepository missionFlowRepository,
                                  FlowRepository flowRepository,
                                  FlowAgentRepository flowAgentRepository,
+                                 AgentRepository agentRepository,
                                  ExecutionRepository executionRepository,
                                  ExecutionStepRepository stepRepository,
                                  ExecutionService executionService,
@@ -71,6 +75,7 @@ public class ExecutionOrchestrator {
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
         this.flowAgentRepository = flowAgentRepository;
+        this.agentRepository = agentRepository;
         this.executionRepository = executionRepository;
         this.stepRepository = stepRepository;
         this.executionService = executionService;
@@ -381,7 +386,7 @@ public class ExecutionOrchestrator {
                 }
             }
 
-            createArtifactsFromOutput(execution, missionFlows, previousOutput, holder.mediaFlows);
+            createArtifactsFromOutput(execution, missionFlows, holder.mediaFlows);
             executionService.complete(executionId, "COMPLETED", null);
             updateMissionStatus(missionId, "COMPLETED");
             emitExecutionEvent(executionId, "execution.completed",
@@ -430,29 +435,45 @@ public class ExecutionOrchestrator {
             }
 
             String category = flow.getCategory() != null ? flow.getCategory() : "";
-            String flowName = flow.getName() != null ? flow.getName().toLowerCase() : "";
 
             for (FlowAgent fa : flowAgents) {
-                String kind;
-                if ("PUBLISHING".equals(category)) {
-                    kind = "PUBLISH";
+                Agent agent = fa.getId() != null ? agentRepository.findById(fa.getId().getAgentId()).orElse(null) : null;
+                String kind = resolveStepKind(category, agent);
+                if (isMediaKind(kind)) {
                     mediaFlows.add(flowId);
-                } else if ("MEDIA".equals(category) && (flowName.contains("image") || flowName.contains("thumbnail"))) {
-                    kind = "IMAGE";
-                    mediaFlows.add(flowId);
-                } else if ("MEDIA".equals(category) && (flowName.contains("voice") || flowName.contains("audio"))) {
-                    kind = "VOICE";
-                    mediaFlows.add(flowId);
-                } else if ("MEDIA".equals(category) && flowName.contains("video")) {
-                    kind = "VIDEO";
-                    mediaFlows.add(flowId);
-                } else {
-                    kind = "LLM";
                 }
                 steps.add(new StepPlan(flowId, fa.getId().getAgentId(), kind));
             }
         }
         return new PlanHolder(steps, mediaFlows);
+    }
+
+    private String resolveStepKind(String flowCategory, Agent agent) {
+        if ("PUBLISHING".equals(flowCategory)) {
+            return "PUBLISH";
+        }
+        if (agent == null) {
+            return "LLM";
+        }
+        String agentName = agent.getName() != null ? agent.getName().toLowerCase() : "";
+        String agentCategory = agent.getCategory() != null ? agent.getCategory().toUpperCase() : "";
+        if ("MEDIA".equals(agentCategory)) {
+            if (agentName.contains("image") || agentName.contains("thumbnail")) {
+                return "IMAGE";
+            }
+            if (agentName.contains("voice") || agentName.contains("audio")) {
+                return "VOICE";
+            }
+            if (agentName.contains("video")) {
+                return "VIDEO";
+            }
+            return "LLM";
+        }
+        return "LLM";
+    }
+
+    private boolean isMediaKind(String kind) {
+        return "IMAGE".equals(kind) || "VOICE".equals(kind) || "VIDEO".equals(kind) || "PUBLISH".equals(kind);
     }
 
     private StepPlan fromStep(ExecutionStep step) {
@@ -473,9 +494,9 @@ public class ExecutionOrchestrator {
     }
 
     private void createArtifactsFromOutput(Execution execution, List<MissionFlow> missionFlows,
-                                           String finalOutput, Set<UUID> mediaFlows) {
-        if (finalOutput == null || finalOutput.isBlank()) return;
+                                           Set<UUID> mediaFlows) {
         UUID missionId = execution.getMissionId();
+        Map<UUID, String> flowOutputs = lastOutputPerFlow(execution.getId());
 
         for (MissionFlow mf : missionFlows) {
             UUID flowId = mf.getId().getFlowId();
@@ -486,6 +507,9 @@ public class ExecutionOrchestrator {
 
             List<FlowAgent> agents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
             if (agents.isEmpty()) continue;
+
+            String flowOutput = flowOutputs.get(flowId);
+            if (flowOutput == null || flowOutput.isBlank()) continue;
 
             String artifactType = switch (flow.getCategory() != null ? flow.getCategory() : "") {
                 case "RESEARCH" -> "RESEARCH";
@@ -503,12 +527,28 @@ public class ExecutionOrchestrator {
             artifact.setName(flow.getName() + " Output");
             artifact.setArtifactType(artifactType);
             artifact.setStatus("COMPLETED");
-            artifact.setContentText(finalOutput);
+            artifact.setContentText(flowOutput);
             artifact.setContentType("text/markdown");
             artifact.setReviewStatus("PENDING");
             artifact.setPublicationStatus("UNPUBLISHED");
             artifactRepository.save(artifact);
         }
+    }
+
+    private Map<UUID, String> lastOutputPerFlow(UUID executionId) {
+        Map<UUID, String> result = new HashMap<>();
+        List<ExecutionStep> steps = stepRepository.findByExecutionIdOrderByStepOrder(executionId);
+        for (ExecutionStep step : steps) {
+            if (!"COMPLETED".equals(step.getStatus()) || step.getFlowId() == null) continue;
+            String output = step.getOutputData();
+            if (output == null || output.isBlank()) continue;
+            if ("IMAGE".equals(step.getStepType()) || "TTS".equals(step.getStepType())
+                    || "VIDEO_GENERATION".equals(step.getStepType()) || "PUBLISH".equals(step.getStepType())) {
+                continue;
+            }
+            result.put(step.getFlowId(), output);
+        }
+        return result;
     }
 
     public void cancelExecution(UUID executionId) {

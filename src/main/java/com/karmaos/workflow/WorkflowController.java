@@ -5,6 +5,7 @@ import com.karmaos.common.ApiConstants;
 import com.karmaos.common.ApiResponse;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -30,6 +31,20 @@ public class WorkflowController {
     public ResponseEntity<ApiResponse<List<WorkflowRunResponse>>> runs(
             @AuthenticationPrincipal UserPrincipal user) {
         return ResponseEntity.ok(ApiResponse.ok(workflowService.listRecentRuns(user.getId())));
+    }
+
+    @GetMapping("/definitions")
+    public ResponseEntity<ApiResponse<List<WorkflowDefinition>>> definitions(
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(workflowService.listAllDefinitions(user.getId())));
+    }
+
+    @DeleteMapping("/definitions/{id}")
+    public ResponseEntity<ApiResponse<Void>> deleteDefinition(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        workflowService.deleteDefinition(id, user.getId());
+        return ResponseEntity.ok(ApiResponse.ok(null));
     }
 
     @GetMapping("/projects/{projectId}/runs")
