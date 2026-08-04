@@ -23,6 +23,7 @@ public class MissionResponse {
     private String priority;
     private UUID providerId;
     private int progress;
+    private String outputDirectory;
     private LocalDateTime startedAt;
     private LocalDateTime completedAt;
     private LocalDateTime createdAt;

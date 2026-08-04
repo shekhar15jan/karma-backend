@@ -14,5 +14,7 @@ public interface WorkflowRunRepository extends JpaRepository<WorkflowRun, UUID> 
 
     List<WorkflowRun> findByProjectIdInOrderByStartedAtDesc(Collection<UUID> projectIds);
 
+    List<WorkflowRun> findByFlowIdOrderByStartedAtDesc(UUID flowId);
+
     List<WorkflowRun> findByStatus(String status);
 }

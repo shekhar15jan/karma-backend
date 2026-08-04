@@ -31,4 +31,7 @@ public class MissionRequest {
     private String priority;
     private UUID providerId;
     private List<UUID> selectedFlowIds;
+
+    @Size(max = 500)
+    private String outputDirectory;
 }

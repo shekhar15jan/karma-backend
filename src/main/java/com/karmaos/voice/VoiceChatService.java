@@ -7,6 +7,7 @@ import com.karmaos.agent.AgentResponse;
 import com.karmaos.agent.AgentService;
 import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionRepository;
+import com.karmaos.knowledge.EmbeddingService;
 import com.karmaos.knowledge.KarmaDocService;
 import com.karmaos.knowledge.KarmaDocService.DocEntry;
 import com.karmaos.llm.LLMProvider;
@@ -22,6 +23,7 @@ import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
 import com.karmaos.report.ReportService;
+import com.karmaos.settings.RuntimeSettings;
 import com.karmaos.system.SystemInfoService;
 import com.karmaos.workspace.Workspace;
 import com.karmaos.workspace.WorkspaceRepository;
@@ -56,6 +58,8 @@ public class VoiceChatService {
     private final WorkspaceRepository workspaceRepository;
     private final ProjectRepository projectRepository;
     private final KarmaMemoryService karmaMemoryService;
+    private final EmbeddingService embeddingService;
+    private final RuntimeSettings runtimeSettings;
 
     public VoiceChatService(AgentService agentService, ProviderRepository providerRepository,
                             ProviderKeyCipher providerKeyCipher,
@@ -64,7 +68,8 @@ public class VoiceChatService {
                             LLMProviderFactory llmProviderFactory, ObjectMapper objectMapper,
                             KarmaDocService karmaDocService, OwnershipService ownershipService,
                             WorkspaceRepository workspaceRepository, ProjectRepository projectRepository,
-                            KarmaMemoryService karmaMemoryService) {
+                            KarmaMemoryService karmaMemoryService, EmbeddingService embeddingService,
+                            RuntimeSettings runtimeSettings) {
         this.agentService = agentService;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -79,6 +84,8 @@ public class VoiceChatService {
         this.workspaceRepository = workspaceRepository;
         this.projectRepository = projectRepository;
         this.karmaMemoryService = karmaMemoryService;
+        this.embeddingService = embeddingService;
+        this.runtimeSettings = runtimeSettings;
     }
 
     public VoiceChatResponse chat(VoiceChatRequest request, UUID userId, String role) {
@@ -266,7 +273,7 @@ public class VoiceChatService {
                         + "Each step can use a different agent or provider. It's like a visual programming canvas for AI tasks.", "navigate", "workflow"),
 
         new FaqEntry(List.of("explain provider", "what is provider", "tell me about providers", "providers overview", "explain provider center"),
-                "Providers are the external AI services KARMA OS connects to — OpenAI, Google Gemini, OpenCode, Stability AI, and more. "
+                "Providers are the external AI services KARMA OS connects to — Google Gemini, OpenCode, Groq, OpenRouter, Edge TTS, and more. "
                         + "Each provider has a type, API endpoint, and status. You can add, edit, or remove them in the Provider Center. "
                         + "Without providers, agents have no AI backend to work with.", "navigate", "providers"),
 
@@ -350,6 +357,11 @@ public class VoiceChatService {
             if (llmProvider == null) {
                 return VoiceChatResponse.staticReply(
                         "I'm having trouble connecting to my AI backend. Please check your provider settings.", "chat", "");
+            }
+
+            if ("gemini".equals(llmProvider.getName())
+                    && runtimeSettings.getBoolean(RuntimeSettings.KEY_GOOGLE_SEARCH_GROUNDING, false)) {
+                llmRequest.setAdditionalParams(Map.of("googleSearchGrounding", true));
             }
 
             LLMResponse llmResponse = llmProvider.chat(llmRequest);
@@ -445,6 +457,24 @@ public class VoiceChatService {
         sb.append("The SYSTEM KNOWLEDGE above (the Black Book) is your ONLY knowledge source for KARMA OS. ");
         sb.append("There are no other on-demand documents to fetch — the /docs files are internal development artifacts and you must NOT reference, list, fetch, or paste them. ");
         sb.append("Never use intent \"doc\". Answer everything about KARMA OS from the Black Book above.\n\n");
+
+        try {
+            String query = request.getText();
+            if (query != null && !query.isBlank() && embeddingService.isAvailable()) {
+                List<EmbeddingService.SemanticHit> hits = embeddingService.search(query, 4);
+                if (!hits.isEmpty()) {
+                    sb.append("RELEVANT KNOWLEDGE (semantic search over the user's uploaded knowledge packs and past outputs):\n");
+                    for (EmbeddingService.SemanticHit hit : hits) {
+                        sb.append("[").append(hit.sourceType()).append("]\n");
+                        sb.append(hit.content()).append("\n\n");
+                    }
+                    sb.append("Use the RELEVANT KNOWLEDGE above as supporting context only when it matches the user's question about their own content. It is the user's material, not KARMA OS documentation, and never changes the Black Book.\n\n");
+                }
+            }
+        } catch (Exception e) {
+            sb.append("");
+        }
+
         sb.append("ACTION-ORIENTED MINDSET: You are the operator of KARMA OS. When the user asks you to do something in the system, DO it through the UI action contract — do not decline, do not just describe it, and do not restate limitations. Open the right screen or modal, pre-fill the form, and tell the user what to confirm in the UI. Use the live system state above to pick the correct workspace, project, provider, and run mode.\n\n");
 
         sb.append("OPERATOR ROLE: The signed-in user has role \"").append(role).append("\". Only two roles exist: ADMIN and OPERATOR. Respect role boundaries: do NOT emit or offer actions the role cannot perform, and never suggest bypassing permissions. If the user asks for something outside their role, explain briefly what their role can do and, when possible, offer the closest permitted action or navigate them to the relevant screen.\n");

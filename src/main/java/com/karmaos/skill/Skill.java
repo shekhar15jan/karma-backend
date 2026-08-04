@@ -36,4 +36,7 @@ public class Skill extends BaseEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "execution_parameters", columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String executionParameters = "{}";
+
+    @Column(name = "is_system", nullable = false)
+    private boolean isSystem = false;
 }

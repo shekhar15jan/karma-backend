@@ -12,15 +12,22 @@ import com.karmaos.llm.LLMRequest;
 import com.karmaos.llm.LLMResponse;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
+import com.karmaos.memory.KarmaMemoryService;
+import com.karmaos.project.Project;
+import com.karmaos.project.ProjectRepository;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
 import com.karmaos.prompt.Prompt;
 import com.karmaos.prompt.PromptRepository;
+import com.karmaos.settings.RuntimeSettings;
 import com.karmaos.skill.Skill;
 import com.karmaos.skill.SkillRepository;
 import com.karmaos.sourcedocument.SourceDocument;
 import com.karmaos.sourcedocument.SourceDocumentRepository;
+import com.karmaos.workspace.Workspace;
+import com.karmaos.workspace.WorkspaceRepository;
+import com.karmaos.settings.RuntimeSettings;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,12 +45,6 @@ public class AgentRuntimeService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentRuntimeService.class);
     private static final Map<String, Double> COST_PER_TOKEN = Map.of(
-        "gpt-4o", 2.5e-6,
-        "gpt-4o-mini", 0.15e-6,
-        "gpt-4-turbo", 10e-6,
-        "claude-3-5-sonnet-20241022", 3e-6,
-        "claude-3-opus-20240229", 15e-6,
-        "claude-3-haiku-20240307", 0.25e-6,
         "gemini-1.5-pro", 1.25e-6,
         "gemini-1.5-flash", 0.075e-6
     );
@@ -59,7 +60,11 @@ public class AgentRuntimeService {
     private final SourceDocumentRepository sourceDocumentRepository;
     private final ExecutionService executionService;
     private final MissionRepository missionRepository;
+    private final ProjectRepository projectRepository;
+    private final WorkspaceRepository workspaceRepository;
+    private final KarmaMemoryService karmaMemoryService;
     private final ObjectMapper objectMapper;
+    private final RuntimeSettings runtimeSettings;
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
                                ProviderRepository providerRepository,
@@ -72,7 +77,11 @@ public class AgentRuntimeService {
                                SourceDocumentRepository sourceDocumentRepository,
                                ExecutionService executionService,
                                MissionRepository missionRepository,
-                               ObjectMapper objectMapper) {
+                               ProjectRepository projectRepository,
+                               WorkspaceRepository workspaceRepository,
+                               KarmaMemoryService karmaMemoryService,
+                               ObjectMapper objectMapper,
+                               RuntimeSettings runtimeSettings) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -84,7 +93,11 @@ public class AgentRuntimeService {
         this.sourceDocumentRepository = sourceDocumentRepository;
         this.executionService = executionService;
         this.missionRepository = missionRepository;
+        this.projectRepository = projectRepository;
+        this.workspaceRepository = workspaceRepository;
+        this.karmaMemoryService = karmaMemoryService;
         this.objectMapper = objectMapper;
+        this.runtimeSettings = runtimeSettings;
     }
 
     public ExecutionStep executeAgentStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
@@ -114,7 +127,7 @@ public class AgentRuntimeService {
             step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
 
             LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
-                    systemPrompt, userMessage, missionId);
+                    systemPrompt, userMessage, missionId, resolveMaxTokens(flow));
             String modelUsed = step.getModelUsed();
 
             step.setPromptTokens(response.getPromptTokens());
@@ -147,7 +160,7 @@ public class AgentRuntimeService {
      * the model gets a chance to produce a valid, non-stub response.
      */
     private LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
-                                                    String systemPrompt, String userMessage, UUID missionId) {
+                                                    String systemPrompt, String userMessage, UUID missionId, int maxTokens) {
         final int maxAttempts = 3;
         LLMResponse lastResponse = null;
         String correctiveHint = "";
@@ -170,11 +183,12 @@ public class AgentRuntimeService {
                 if (llmProvider == null || "mock".equals(llmProvider.getName())) {
                     continue;
                 }
-                String modelUsed = resolveModel(provider, llmProvider);
+                String modelUsed = resolveModel(agent, provider, llmProvider);
                 LLMRequest request = new LLMRequest(systemPrompt, userMessage + correctiveHint);
                 request.setModel(modelUsed);
                 request.setTemperature(resolveTemperature(agent));
-                request.setMaxTokens(12000);
+                request.setMaxTokens(maxTokens);
+                applyGrounding(provider, request);
 
                 step.setProviderId(provider.getId());
                 step.setModelUsed(modelUsed);
@@ -221,6 +235,15 @@ public class AgentRuntimeService {
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
+    private void applyGrounding(Provider provider, LLMRequest request) {
+        String type = provider != null && provider.getProviderType() != null
+                ? provider.getProviderType().toLowerCase() : "";
+        if (("google".equals(type) || "gemini".equals(type))
+                && runtimeSettings.getBoolean(RuntimeSettings.KEY_GOOGLE_SEARCH_GROUNDING, false)) {
+            request.setAdditionalParams(Map.of("googleSearchGrounding", true));
+        }
+    }
+
     private String buildSystemPrompt(Agent agent, Flow flow, UUID missionId) {
         StringBuilder sb = new StringBuilder();
 
@@ -258,7 +281,71 @@ public class AgentRuntimeService {
             }
         }
 
+        String memoryMode = configuredMemoryMode(agent);
+        if (!"OFF".equalsIgnoreCase(memoryMode)) {
+            UUID ownerId = resolveMissionOwnerId(missionId);
+            if (ownerId != null) {
+                boolean includeAuto = "AUTO".equalsIgnoreCase(memoryMode);
+                String memoryBlock = karmaMemoryService.buildMemoryPromptBlock(ownerId, includeAuto);
+                if (!memoryBlock.isBlank()) {
+                    sb.append("\n\n").append(memoryBlock);
+                }
+            }
+        }
+
+        if (isStoryScriptWriter(agent)) {
+            sb.append("\n\nOUTPUT FORMAT REQUIREMENT (MANDATORY):\n")
+              .append("If the upstream context instructs you to write a story / narration script for a video, ")
+              .append("respond with a single valid JSON object (no markdown fences) conforming to this exact schema:\n")
+              .append("{\n")
+              .append("  \"title\": \"short title of the story\",\n")
+              .append("  \"script_body\": [\n")
+              .append("    { \"scene_number\": 1,\n")
+              .append("      \"speaker_text\": \"exact narration sentence to be spoken for this scene\",\n")
+              .append("      \"image_prompt\": \"detailed visual description used to generate this scene's picture\",\n")
+              .append("      \"visual_description\": \"what appears on screen\" }\n")
+              .append("  ]\n")
+              .append("}\n")
+              .append("Write 5 to 7 concise scenes for a self-contained story. Each speaker_text must be one or two ")
+              .append("complete spoken sentences. Each image_prompt must be a self-contained, vivid visual description ")
+              .append("suitable for an image generator. Make the story wholesome, complete, and non-branded.");
+        }
+
         return sb.toString();
+    }
+
+    private boolean isStoryScriptWriter(Agent agent) {
+        if (agent == null || agent.getName() == null) return false;
+        String n = agent.getName().toLowerCase();
+        String c = agent.getCategory() != null ? agent.getCategory().toLowerCase() : "";
+        return n.contains("script") || n.contains("story") || n.contains("narrat")
+            || c.contains("script") || c.contains("story");
+    }
+
+    private String configuredMemoryMode(Agent agent) {
+        if (agent == null || agent.getConfiguration() == null) return "OFF";
+        try {
+            JsonNode config = objectMapper.readTree(agent.getConfiguration());
+            if (config.has("memoryMode")) {
+                String mode = config.get("memoryMode").asText();
+                return mode == null || mode.isBlank() ? "OFF" : mode.trim().toUpperCase();
+            }
+        } catch (Exception ignored) {}
+        return "OFF";
+    }
+
+    private UUID resolveMissionOwnerId(UUID missionId) {
+        try {
+            Mission mission = missionId != null ? missionRepository.findById(missionId).orElse(null) : null;
+            if (mission == null || mission.getProjectId() == null) return null;
+            Project project = projectRepository.findById(mission.getProjectId()).orElse(null);
+            if (project == null || project.getWorkspaceId() == null) return null;
+            Workspace workspace = workspaceRepository.findById(project.getWorkspaceId()).orElse(null);
+            return workspace != null ? workspace.getOwnerId() : null;
+        } catch (Exception e) {
+            log.warn("Failed to resolve mission owner for memory: {}", e.getMessage());
+            return null;
+        }
     }
 
     private String buildUserMessage(Agent agent, String contextData, UUID missionId, String reviewerFeedback) {
@@ -304,6 +391,22 @@ public class AgentRuntimeService {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * Applies the frontend-configurable per-call token budget. Heavy deliverable
+     * steps (planning, content, review) use the reasoning tier; lighter steps use
+     * the default tier.
+     */
+    private int resolveMaxTokens(Flow flow) {
+        String category = flow != null && flow.getCategory() != null
+                ? flow.getCategory().toUpperCase(Locale.ROOT) : "";
+        boolean reasoningTier = "PLANNING".equals(category)
+                || "CONTENT".equals(category)
+                || "REVIEW".equals(category);
+        return reasoningTier
+                ? runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_REASONING, 4096)
+                : runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_DEFAULT, 1024);
     }
 
     private double resolveTemperature(Agent agent) {
@@ -356,7 +459,11 @@ public class AgentRuntimeService {
         }
     }
 
-    private String resolveModel(Provider provider, LLMProvider llmProvider) {
+    private String resolveModel(Agent agent, Provider provider, LLMProvider llmProvider) {
+        String configured = configuredModel(agent);
+        if (configured != null && !configured.isBlank()) {
+            return configured;
+        }
         if (provider != null && provider.getModels() != null && !provider.getModels().isBlank()) {
             try {
                 List<String> models = objectMapper.readValue(provider.getModels(), new TypeReference<List<String>>() {});
@@ -368,16 +475,32 @@ public class AgentRuntimeService {
         return llmProvider.getDefaultModel();
     }
 
+    private String configuredModel(Agent agent) {
+        if (agent == null || agent.getConfiguration() == null) return null;
+        try {
+            JsonNode config = objectMapper.readTree(agent.getConfiguration());
+            if (config.has("model")) {
+                String model = config.get("model").asText();
+                return model == null || model.isBlank() ? null : model.trim();
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     private List<Skill> getAgentSkills(UUID agentId) {
         if (agentId == null) return List.of();
         try {
             return agentSkillRepository.findByIdAgentId(agentId).stream()
                 .map(as -> skillRepository.findById(as.getId().getSkillId()).orElse(null))
-                .filter(Objects::nonNull)
+                .filter(s -> s != null && s.getDeletedAt() == null && isLiveSkillStatus(s.getStatus()))
                 .collect(Collectors.toList());
         } catch (Exception e) {
             return List.of();
         }
+    }
+
+    private static boolean isLiveSkillStatus(String status) {
+        return status != null && ("ACTIVE".equals(status) || "INSTALLED".equals(status));
     }
 
     public Map<String, Object> executePromptSync(String systemPrompt, String userMessage) {
@@ -389,7 +512,8 @@ public class AgentRuntimeService {
                 if (llmProvider == null || "mock".equals(llmProvider.getName())) {
                     continue;
                 }
-                request.setModel(resolveModel(provider, llmProvider));
+                request.setModel(resolveModel(null, provider, llmProvider));
+                applyGrounding(provider, request);
                 LLMResponse response = llmProvider.chat(request);
                 if (response.isSuccess()) {
                     log.info("executePromptSync succeeded via provider {} model {}", provider.getName(), response.getModel());
@@ -467,9 +591,8 @@ public class AgentRuntimeService {
     private boolean isLlmProvider(String providerType) {
         if (providerType == null) return false;
         String t = providerType.toLowerCase();
-        return t.equals("openai") || t.equals("anthropic") || t.equals("google")
-            || t.equals("gemini") || t.equals("openrouter") || t.equals("opencode")
-            || t.equals("groq");
+        return t.equals("google") || t.equals("gemini") || t.equals("openrouter")
+            || t.equals("opencode") || t.equals("groq");
     }
 
     private BigDecimal calculateCost(String model, int promptTokens, int completionTokens) {

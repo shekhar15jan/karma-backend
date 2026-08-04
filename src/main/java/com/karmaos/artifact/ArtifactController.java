@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -26,9 +27,18 @@ import java.util.UUID;
 public class ArtifactController {
 
     private final ArtifactService artifactService;
+    private final ArtifactStorageService artifactStorageService;
 
-    public ArtifactController(ArtifactService artifactService) {
+    public ArtifactController(ArtifactService artifactService, ArtifactStorageService artifactStorageService) {
         this.artifactService = artifactService;
+        this.artifactStorageService = artifactStorageService;
+    }
+
+    @GetMapping("/storage-root")
+    public ResponseEntity<ApiResponse<Map<String, String>>> storageRoot() {
+        return ResponseEntity.ok(ApiResponse.ok(Map.of(
+                "hostRoot", artifactStorageService.getHostRoot(),
+                "containerRoot", artifactStorageService.getStorageRoot())));
     }
 
     @GetMapping

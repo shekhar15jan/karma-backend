@@ -35,15 +35,18 @@ public class KnowledgePackService {
     private final KnowledgeDocumentRepository documentRepository;
     private final OwnershipService ownershipService;
     private final ObjectMapper objectMapper;
+    private final EmbeddingService embeddingService;
 
     public KnowledgePackService(KnowledgePackRepository repository,
                                 KnowledgeDocumentRepository documentRepository,
                                 OwnershipService ownershipService,
-                                ObjectMapper objectMapper) {
+                                ObjectMapper objectMapper,
+                                EmbeddingService embeddingService) {
         this.repository = repository;
         this.documentRepository = documentRepository;
         this.ownershipService = ownershipService;
         this.objectMapper = objectMapper;
+        this.embeddingService = embeddingService;
     }
 
     public List<KnowledgePackResponse> listAll(UUID userId) {
@@ -115,6 +118,7 @@ public class KnowledgePackService {
             doc.setIndexed(true);
             doc.setChecksum(checksum);
             documentRepository.save(doc);
+            embeddingService.indexPack(pack.getId());
 
             return Map.of(
                     "success", true,
@@ -130,6 +134,12 @@ public class KnowledgePackService {
     public KnowledgePackResponse getById(UUID id, UUID userId) {
         KnowledgePack pack = getOwnedPack(id, userId);
         return toResponse(pack);
+    }
+
+    public Map<String, Object> reindex(UUID id, UUID userId) {
+        getOwnedPack(id, userId);
+        embeddingService.indexPack(id);
+        return Map.of("success", true, "status", "INDEXED");
     }
 
     @Transactional

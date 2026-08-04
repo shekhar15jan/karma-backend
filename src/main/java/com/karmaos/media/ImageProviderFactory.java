@@ -36,9 +36,8 @@ public class ImageProviderFactory {
     private ImageProvider createProvider(String providerType, String apiKey) {
         if (providerType == null) return getFallbackProvider();
         return switch (providerType.toLowerCase()) {
-            case "openai" -> new OpenAIImageProvider(apiKey, webClientBuilder, objectMapper);
             case "google", "gemini" -> new GoogleImageProvider(apiKey, webClientBuilder, objectMapper);
-            case "stability" -> new StabilityAiImageProvider(apiKey);
+            case "pollinations", "pollinations-image" -> new PollinationsImageProvider(webClientBuilder);
             default -> {
                 log.warn("Unsupported image provider type: {}, using mock", providerType);
                 yield getFallbackProvider();

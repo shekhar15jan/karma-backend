@@ -8,4 +8,8 @@ public interface VoiceProvider {
     List<String> getAvailableModels();
     VoiceResponse synthesize(VoiceRequest request);
     boolean testConnection();
+
+    default List<String> fetchAvailableModels() {
+        return getAvailableModels();
+    }
 }

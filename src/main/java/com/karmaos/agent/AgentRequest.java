@@ -7,6 +7,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -28,4 +29,8 @@ public class AgentRequest {
     private UUID defaultProviderId;
     private UUID fallbackProviderId;
     private Object configuration;
+    private String model;
+    private Double temperature;
+    private String memoryMode;
+    private List<UUID> skillIds;
 }

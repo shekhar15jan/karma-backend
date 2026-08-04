@@ -27,9 +27,19 @@ import java.util.UUID;
 public class KnowledgePackController {
 
     private final KnowledgePackService knowledgePackService;
+    private final EmbeddingService embeddingService;
 
-    public KnowledgePackController(KnowledgePackService knowledgePackService) {
+    public KnowledgePackController(KnowledgePackService knowledgePackService, EmbeddingService embeddingService) {
         this.knowledgePackService = knowledgePackService;
+        this.embeddingService = embeddingService;
+    }
+
+    @GetMapping("/search")
+    public ResponseEntity<ApiResponse<List<EmbeddingService.SemanticHit>>> search(
+            @RequestParam("q") String query,
+            @RequestParam(defaultValue = "5") int topK,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(embeddingService.search(query, topK)));
     }
 
     @GetMapping
@@ -48,6 +58,13 @@ public class KnowledgePackController {
             @RequestParam(required = false) UUID workspaceId,
             @AuthenticationPrincipal UserPrincipal user) {
         return ResponseEntity.ok(ApiResponse.ok(knowledgePackService.uploadFile(file, workspaceId, user.getId())));
+    }
+
+    @PostMapping("/{id}/reindex")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> reindex(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(knowledgePackService.reindex(id, user.getId())));
     }
 
     @GetMapping("/{id}")

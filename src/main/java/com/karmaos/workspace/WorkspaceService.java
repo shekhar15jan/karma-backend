@@ -1,6 +1,7 @@
 package com.karmaos.workspace;
 
 import com.karmaos.artifact.ArtifactRepository;
+import com.karmaos.artifact.ArtifactStorageService;
 import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ErrorCode;
 import com.karmaos.mission.Mission;
@@ -21,17 +22,20 @@ public class WorkspaceService {
     private final ProjectRepository projectRepository;
     private final MissionRepository missionRepository;
     private final ArtifactRepository artifactRepository;
+    private final ArtifactStorageService artifactStorageService;
     private final int maxWorkspacesPerUser;
 
     public WorkspaceService(WorkspaceRepository workspaceRepository,
                             ProjectRepository projectRepository,
                             MissionRepository missionRepository,
                             ArtifactRepository artifactRepository,
+                            ArtifactStorageService artifactStorageService,
                             @Value("${app.workspace.max-per-user:10}") int maxWorkspacesPerUser) {
         this.workspaceRepository = workspaceRepository;
         this.projectRepository = projectRepository;
         this.missionRepository = missionRepository;
         this.artifactRepository = artifactRepository;
+        this.artifactStorageService = artifactStorageService;
         this.maxWorkspacesPerUser = maxWorkspacesPerUser;
     }
 
@@ -58,6 +62,7 @@ public class WorkspaceService {
         Workspace workspace = new Workspace();
         workspace.setName(request.getName());
         workspace.setDescription(request.getDescription());
+        workspace.setDefaultOutputDirectory(artifactStorageService.normalizeFolder(request.getDefaultOutputDirectory()));
         workspace.setOwnerId(user.getId());
         workspace = workspaceRepository.save(workspace);
         return toResponse(workspace);
@@ -71,6 +76,7 @@ public class WorkspaceService {
         }
         workspace.setName(request.getName());
         workspace.setDescription(request.getDescription());
+        workspace.setDefaultOutputDirectory(artifactStorageService.normalizeFolder(request.getDefaultOutputDirectory()));
         workspace = workspaceRepository.save(workspace);
         return toResponse(workspace);
     }
@@ -112,6 +118,7 @@ public class WorkspaceService {
                 .description(w.getDescription())
                 .ownerId(w.getOwnerId())
                 .status(w.getStatus())
+                .defaultOutputDirectory(w.getDefaultOutputDirectory())
                 .projectCount(projectIds.size())
                 .missionCount(missionIds.size())
                 .artifactCount(missionIds.isEmpty() ? 0 : artifactRepository.countByMissionIdIn(missionIds))

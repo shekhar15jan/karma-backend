@@ -46,6 +46,30 @@ public class GroqProvider implements LLMProvider {
     public List<String> getAvailableModels() { return MODELS; }
 
     @Override
+    public List<String> fetchAvailableModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            JsonNode response = webClient.get()
+                .uri("https://api.groq.com/openai/v1/models")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block();
+            if (response != null && response.hasNonNull("data")) {
+                for (JsonNode m : response.get("data")) {
+                    String id = m.path("id").asText("");
+                    if (!id.isBlank() && !result.contains(id)) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Groq model discovery failed: {}", e.getMessage());
+        }
+        return result.isEmpty() ? getAvailableModels() : result;
+    }
+
+    @Override
     public LLMResponse chat(LLMRequest request) {
         long start = System.currentTimeMillis();
         try {

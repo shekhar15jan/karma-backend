@@ -1,13 +1,13 @@
 package com.karmaos.mission;
 
 import com.karmaos.access.OwnershipService;
+import com.karmaos.artifact.ArtifactStorageService;
 import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
 import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionOrchestrator;
 import com.karmaos.execution.ExecutionRepository;
-import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowId;
@@ -17,7 +17,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -34,12 +33,7 @@ public class MissionService {
     private final ExecutionRepository executionRepository;
     private final OwnershipService ownershipService;
     private final ProviderRepository providerRepository;
-
-    private static final java.util.Map<String, String> MISSION_TYPE_TO_FLOW_NAME = java.util.Map.of(
-        "VIDEO", "Video Generation Flow",
-        "BLOG", "Blog Generation Flow",
-        "SCRIPT", "Script Generation Flow"
-    );
+    private final ArtifactStorageService artifactStorageService;
 
     private static final Set<String> ALLOWED_MISSION_TYPES =
             Set.of("VIDEO", "BLOG", "SCRIPT", "VOICE", "THUMBNAIL", "WORKFLOW");
@@ -49,9 +43,10 @@ public class MissionService {
                           MissionFlowRepository missionFlowRepository,
                           FlowRepository flowRepository,
                           ExecutionOrchestrator orchestrator,
-                          ExecutionRepository executionRepository,
-                          OwnershipService ownershipService,
-                          ProviderRepository providerRepository) {
+ExecutionRepository executionRepository,
+                           OwnershipService ownershipService,
+                           ProviderRepository providerRepository,
+                           ArtifactStorageService artifactStorageService) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
@@ -59,6 +54,7 @@ public class MissionService {
         this.executionRepository = executionRepository;
         this.ownershipService = ownershipService;
         this.providerRepository = providerRepository;
+        this.artifactStorageService = artifactStorageService;
     }
 
     public List<MissionResponse> listByProject(UUID projectId, UserPrincipal user) {
@@ -85,6 +81,7 @@ public class MissionService {
         mission.setMissionType(normalizeType(request.getMissionType()));
         mission.setPriority(normalizePriority(request.getPriority()));
         mission.setProviderId(request.getProviderId());
+        mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
         mission.setStatus("DRAFT");
         mission.setProgress(0);
         mission = missionRepository.save(mission);
@@ -129,35 +126,24 @@ public class MissionService {
     private void linkFlowsToMission(Mission mission, MissionRequest request) {
         List<UUID> selectedFlowIds = request.getSelectedFlowIds();
 
-        if (selectedFlowIds != null && !selectedFlowIds.isEmpty()) {
-            Set<UUID> seen = new LinkedHashSet<>();
-            int order = 0;
-            for (UUID flowId : selectedFlowIds) {
-                if (flowId == null || !seen.add(flowId)) {
-                    continue;
-                }
-                if (flowRepository.findByIdAndStatus(flowId, "ACTIVE").isEmpty()) {
-                    throw new ApiException(ErrorCode.BAD_REQUEST, "Flow not found or inactive: " + flowId);
-                }
-                MissionFlow mf = new MissionFlow();
-                mf.setId(new MissionFlowId(mission.getId(), flowId));
-                mf.setExecOrder(order++);
-                mf.setStatus("ACTIVE");
-                missionFlowRepository.save(mf);
+        if (selectedFlowIds == null || selectedFlowIds.isEmpty()) {
+            return;
+        }
+
+        Set<UUID> seen = new LinkedHashSet<>();
+        int order = 0;
+        for (UUID flowId : selectedFlowIds) {
+            if (flowId == null || !seen.add(flowId)) {
+                continue;
             }
-        } else {
-            String flowName = MISSION_TYPE_TO_FLOW_NAME.get(mission.getMissionType());
-            if (flowName != null) {
-                flowRepository.findByNameContainingIgnoreCaseAndStatus(flowName, "ACTIVE").stream()
-                    .min(Comparator.comparing(Flow::getCreatedAt))
-                    .ifPresent(flow -> {
-                        MissionFlow mf = new MissionFlow();
-                        mf.setId(new MissionFlowId(mission.getId(), flow.getId()));
-                        mf.setExecOrder(1);
-                        mf.setStatus("ACTIVE");
-                        missionFlowRepository.save(mf);
-                    });
+            if (flowRepository.findByIdAndStatus(flowId, "ACTIVE").isEmpty()) {
+                throw new ApiException(ErrorCode.BAD_REQUEST, "Flow not found or inactive: " + flowId);
             }
+            MissionFlow mf = new MissionFlow();
+            mf.setId(new MissionFlowId(mission.getId(), flowId));
+            mf.setExecOrder(order++);
+            mf.setStatus("ACTIVE");
+            missionFlowRepository.save(mf);
         }
     }
 
@@ -174,6 +160,7 @@ public class MissionService {
         }
         validateProvider(request.getProviderId());
         mission.setProviderId(request.getProviderId());
+        mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
         mission = missionRepository.save(mission);
         relinkFlowsToMission(mission, request);
         return toResponse(mission);
@@ -231,6 +218,7 @@ public class MissionService {
                 .priority(m.getPriority())
                 .providerId(m.getProviderId())
                 .progress(m.getProgress())
+                .outputDirectory(m.getOutputDirectory())
                 .startedAt(m.getStartedAt())
                 .completedAt(m.getCompletedAt())
                 .createdAt(m.getCreatedAt())

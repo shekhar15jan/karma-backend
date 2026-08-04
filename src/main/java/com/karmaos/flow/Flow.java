@@ -35,4 +35,7 @@ public class Flow extends BaseEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "JSONB DEFAULT '{}'::jsonb")
     private String parameters = "{}";
+
+    @Column(name = "is_system", nullable = false)
+    private boolean isSystem = false;
 }

@@ -162,11 +162,22 @@ public class KarmaMemoryService {
      * (reuses what worked, avoids repeating failures).
      */
     public String buildMemoryPromptBlock(UUID userId) {
+        return buildMemoryPromptBlock(userId, true);
+    }
+
+    /**
+     * Same as {@link #buildMemoryPromptBlock(UUID)} but with a toggle for the auto-learned
+     * (implicit) memories and action outcomes. USER mode only includes explicit user-told
+     * memories; AUTO mode adds learned preferences and recent action outcomes.
+     */
+    public String buildMemoryPromptBlock(UUID userId, boolean includeAuto) {
         StringBuilder sb = new StringBuilder();
         try {
             List<KarmaUserMemory> memories = memoryRepository.findByUserIdOrderByConfidenceDesc(userId);
             List<KarmaUserMemory> shown = new ArrayList<>();
             for (KarmaUserMemory m : memories) {
+                boolean explicitOnly = !includeAuto && !"EXPLICIT".equalsIgnoreCase(m.getSource());
+                if (explicitOnly) continue;
                 if ("EXPLICIT".equalsIgnoreCase(m.getSource()) || m.getConfidence() >= 60) {
                     shown.add(m);
                     if (shown.size() >= 6) break;
@@ -182,29 +193,31 @@ public class KarmaMemoryService {
                 sb.append("\n");
             }
 
-            List<KarmaInteractionEvent> recent = eventRepository.findTop20ByUserIdOrderByCreatedAtDesc(userId);
-            List<KarmaInteractionEvent> withAction = new ArrayList<>();
-            for (KarmaInteractionEvent e : recent) {
-                if (e.getActionType() != null && !e.getActionType().isBlank()) {
-                    withAction.add(e);
-                    if (withAction.size() >= 8) break;
+            if (includeAuto) {
+                List<KarmaInteractionEvent> recent = eventRepository.findTop20ByUserIdOrderByCreatedAtDesc(userId);
+                List<KarmaInteractionEvent> withAction = new ArrayList<>();
+                for (KarmaInteractionEvent e : recent) {
+                    if (e.getActionType() != null && !e.getActionType().isBlank()) {
+                        withAction.add(e);
+                        if (withAction.size() >= 8) break;
+                    }
                 }
-            }
-            if (!withAction.isEmpty()) {
-                sb.append("RECENT ACTION OUTCOMES (what happened on this account recently — avoid repeating failures, reuse what succeeded):\n");
-                for (KarmaInteractionEvent e : withAction) {
-                    String when = e.getCreatedAt() != null ? e.getCreatedAt().format(TIME_FMT) : "";
-                    String outcome = "SUCCESS".equals(e.getActionStatus()) ? "OK"
-                            : "FAILED".equals(e.getActionStatus()) ? "FAILED"
-                            : "sent-to-UI";
-                    sb.append("  - [").append(when).append("] ").append(e.getActionType())
-                      .append(" → ").append(outcome);
-                    if (e.getOutcomeNote() != null && !e.getOutcomeNote().isBlank()) {
-                        sb.append(" (").append(e.getOutcomeNote()).append(")");
+                if (!withAction.isEmpty()) {
+                    sb.append("RECENT ACTION OUTCOMES (what happened on this account recently — avoid repeating failures, reuse what succeeded):\n");
+                    for (KarmaInteractionEvent e : withAction) {
+                        String when = e.getCreatedAt() != null ? e.getCreatedAt().format(TIME_FMT) : "";
+                        String outcome = "SUCCESS".equals(e.getActionStatus()) ? "OK"
+                                : "FAILED".equals(e.getActionStatus()) ? "FAILED"
+                                : "sent-to-UI";
+                        sb.append("  - [").append(when).append("] ").append(e.getActionType())
+                          .append(" → ").append(outcome);
+                        if (e.getOutcomeNote() != null && !e.getOutcomeNote().isBlank()) {
+                            sb.append(" (").append(e.getOutcomeNote()).append(")");
+                        }
+                        sb.append("\n");
                     }
                     sb.append("\n");
                 }
-                sb.append("\n");
             }
         } catch (Exception e) {
             log.warn("Failed to build memory block for user {}: {}", userId, e.getMessage());

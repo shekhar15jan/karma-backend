@@ -19,6 +19,7 @@ public class WorkspaceResponse {
     private String description;
     private UUID ownerId;
     private String status;
+    private String defaultOutputDirectory;
     private long projectCount;
     private long missionCount;
     private long artifactCount;

@@ -1,11 +1,14 @@
 package com.karmaos.execution;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.agent.Agent;
 import com.karmaos.agent.AgentRepository;
 import com.karmaos.agent.AgentRuntimeService;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
+import com.karmaos.artifact.ArtifactStorageService;
 import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.FlowAgent;
@@ -17,6 +20,7 @@ import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
 import com.karmaos.publication.Publication;
 import com.karmaos.publishing.PublishingService;
+import com.karmaos.workflow.DesignPlan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -50,9 +54,11 @@ public class ExecutionOrchestrator {
     private final AgentRuntimeService agentRuntimeService;
     private final MediaOrchestrationService mediaOrchestrationService;
     private final ArtifactRepository artifactRepository;
+    private final ArtifactStorageService artifactStorageService;
     private final PublishingService publishingService;
     private final com.karmaos.sse.SseController sseController;
     private final ObjectMapper objectMapper;
+    private final com.karmaos.knowledge.EmbeddingService embeddingService;
 
     private final Map<UUID, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -68,9 +74,11 @@ public class ExecutionOrchestrator {
                                  AgentRuntimeService agentRuntimeService,
                                  MediaOrchestrationService mediaOrchestrationService,
                                  ArtifactRepository artifactRepository,
+                                 ArtifactStorageService artifactStorageService,
                                  PublishingService publishingService,
                                  com.karmaos.sse.SseController sseController,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 com.karmaos.knowledge.EmbeddingService embeddingService) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
@@ -82,9 +90,11 @@ public class ExecutionOrchestrator {
         this.agentRuntimeService = agentRuntimeService;
         this.mediaOrchestrationService = mediaOrchestrationService;
         this.artifactRepository = artifactRepository;
+        this.artifactStorageService = artifactStorageService;
         this.publishingService = publishingService;
         this.sseController = sseController;
         this.objectMapper = objectMapper;
+        this.embeddingService = embeddingService;
     }
 
     @Transactional
@@ -210,18 +220,27 @@ public class ExecutionOrchestrator {
         UUID executionId = execution.getId();
         UUID missionId = execution.getMissionId();
         int stepOrder = step.getStepOrder();
-        StepPlan plan = fromStep(step);
+        List<MissionFlow> missionFlows = missionFlowRepository.findByIdMissionId(missionId);
+        missionFlows.sort(Comparator.comparingInt(MissionFlow::getExecOrder));
+        PlanHolder planHolder = buildPlan(missionFlows);
+        StepPlan plan = stepOrder >= 0 && stepOrder < planHolder.steps.size()
+            ? planHolder.steps.get(stepOrder) : fromStep(step);
         int retryCount = rejected;
 
         runAsync(executionId, () -> {
             try {
                 Meta meta = readMeta(execution);
-                ExecutionStep rerun = runStep(executionId, plan, stepOrder, meta.previousOutput, feedback, missionId);
+                Map<String, String> nodeOutputs = rebuildNodeOutputs(executionId);
+                String context = contextFor(meta.previousOutput, plan, nodeOutputs);
+                ExecutionStep rerun = runStep(executionId, plan, stepOrder, context, feedback, missionId);
                 if (!"COMPLETED".equals(rerun.getStatus())) {
                     executionService.complete(executionId, "FAILED",
                         "Regeneration failed: " + rerun.getErrorMessage());
                     updateMissionStatus(missionId, "FAILED");
                     return;
+                }
+                if (plan.nodeId != null) {
+                    rerun.setNodeId(plan.nodeId);
                 }
                 rerun.setRetryCount(retryCount);
                 rerun.setReviewStatus("PENDING_REVIEW");
@@ -352,10 +371,13 @@ public class ExecutionOrchestrator {
         String previousOutput = meta.previousOutput != null ? meta.previousOutput : meta.feedback;
         int totalSteps = holder.steps.size();
 
+        Map<String, String> nodeOutputs = rebuildNodeOutputs(executionId);
+
         try {
             for (int i = startIndex; i < holder.steps.size(); i++) {
                 StepPlan sp = holder.steps.get(i);
-                ExecutionStep step = runStep(executionId, sp, i, previousOutput, null, missionId);
+                String context = contextFor(previousOutput, sp, nodeOutputs);
+                ExecutionStep step = runStep(executionId, sp, i, context, null, missionId);
 
                 if (!"COMPLETED".equals(step.getStatus())) {
                     executionService.complete(executionId, "FAILED",
@@ -364,6 +386,11 @@ public class ExecutionOrchestrator {
                     return;
                 }
 
+                if (sp.nodeId != null) {
+                    step.setNodeId(sp.nodeId);
+                    stepRepository.save(step);
+                    nodeOutputs.put(sp.nodeId, step.getOutputData());
+                }
                 previousOutput = step.getOutputData();
                 updateMissionProgress(missionId,
                         totalSteps > 0 ? (int) Math.round(((i + 1) * 100.0) / totalSteps) : 100);
@@ -409,6 +436,8 @@ public class ExecutionOrchestrator {
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             case "VOICE" -> mediaOrchestrationService.executeVoiceStep(
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+            case "MUSIC" -> mediaOrchestrationService.executeMusicStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             case "VIDEO" -> mediaOrchestrationService.executeVideoStep(
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             default -> agentRuntimeService.executeAgentStep(
@@ -425,6 +454,12 @@ public class ExecutionOrchestrator {
             Flow flow = flowRepository.findByIdAndStatus(flowId, "ACTIVE").orElse(null);
             if (flow == null) {
                 log.warn("Flow {} not found or inactive; skipping in plan", flowId);
+                continue;
+            }
+
+            DesignPlanHolder design = parseDesign(flow);
+            if (design != null) {
+                buildDesignSteps(flowId, flow, design, steps, mediaFlows);
                 continue;
             }
 
@@ -448,21 +483,77 @@ public class ExecutionOrchestrator {
         return new PlanHolder(steps, mediaFlows);
     }
 
-    private String resolveStepKind(String flowCategory, Agent agent) {
-        if ("PUBLISHING".equals(flowCategory)) {
-            return "PUBLISH";
+    private DesignPlanHolder parseDesign(Flow flow) {
+        String parameters = flow.getParameters();
+        if (parameters == null || parameters.isBlank()) {
+            return null;
         }
+        try {
+            JsonNode root = objectMapper.readTree(parameters);
+            if (root == null || !root.hasNonNull(DesignPlan.KEY_DESIGN)) {
+                return null;
+            }
+            JsonNode design = root.get(DesignPlan.KEY_DESIGN);
+            List<Map<String, Object>> nodes = objectMapper.convertValue(design.get("nodes"),
+                new TypeReference<List<Map<String, Object>>>() { });
+            List<Map<String, String>> edges = objectMapper.convertValue(design.get("edges"),
+                new TypeReference<List<Map<String, String>>>() { });
+            return new DesignPlanHolder(DesignPlan.resolve(nodes, edges));
+        } catch (Exception e) {
+            log.warn("Invalid design parameters for flow {}: {}", flow.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private void buildDesignSteps(UUID flowId, Flow flow, DesignPlanHolder design,
+                                  List<StepPlan> steps, Set<UUID> mediaFlows) {
+        String category = flow.getCategory() != null ? flow.getCategory() : "";
+        for (DesignPlan.Node node : design.nodes) {
+            Agent agent = node.agentId != null ? agentRepository.findById(node.agentId).orElse(null) : null;
+            String kind = resolveDesignKind(node.stepKind, category, agent);
+            if (isMediaKind(kind)) {
+                mediaFlows.add(flowId);
+            }
+            steps.add(new StepPlan(flowId, node.agentId, kind, node.nodeId, node.upstreams));
+        }
+    }
+
+    private String resolveDesignKind(String stepKind, String flowCategory, Agent agent) {
+        if (stepKind != null && !stepKind.isBlank()) {
+            String kind = stepKind.trim().toUpperCase();
+            switch (kind) {
+                case "VIDEO":
+                case "PUBLISH":
+                case "IMAGE":
+                case "VOICE":
+                case "MUSIC":
+                    return kind;
+                default:
+                    // "AGENT" or unknown kinds fall through to inference
+                    break;
+            }
+        }
+        return resolveStepKind(flowCategory, agent);
+    }
+
+    private String resolveStepKind(String flowCategory, Agent agent) {
         if (agent == null) {
             return "LLM";
         }
         String agentName = agent.getName() != null ? agent.getName().toLowerCase() : "";
         String agentCategory = agent.getCategory() != null ? agent.getCategory().toUpperCase() : "";
+        if ("PUBLISHING".equals(agentCategory) || agentName.contains("publish")) {
+            return "PUBLISH";
+        }
         if ("MEDIA".equals(agentCategory)) {
             if (agentName.contains("image") || agentName.contains("thumbnail")) {
                 return "IMAGE";
             }
             if (agentName.contains("voice") || agentName.contains("audio")) {
                 return "VOICE";
+            }
+            if (agentName.contains("music")) {
+                return "MUSIC";
             }
             if (agentName.contains("video")) {
                 return "VIDEO";
@@ -473,7 +564,8 @@ public class ExecutionOrchestrator {
     }
 
     private boolean isMediaKind(String kind) {
-        return "IMAGE".equals(kind) || "VOICE".equals(kind) || "VIDEO".equals(kind) || "PUBLISH".equals(kind);
+        return "IMAGE".equals(kind) || "VOICE".equals(kind) || "MUSIC".equals(kind)
+                || "VIDEO".equals(kind) || "PUBLISH".equals(kind);
     }
 
     private StepPlan fromStep(ExecutionStep step) {
@@ -482,15 +574,45 @@ public class ExecutionOrchestrator {
                 case "PUBLISH" -> "PUBLISH";
                 case "IMAGE_GENERATION" -> "IMAGE";
                 case "TTS" -> "VOICE";
+                case "MUSIC_GENERATION" -> "MUSIC";
                 case "VIDEO_GENERATION" -> "VIDEO";
                 default -> "LLM";
-            });
+            }, step.getNodeId(), Collections.emptyList());
     }
 
     private int countRejectedAttempts(UUID executionId, int stepOrder) {
         return (int) stepRepository.findByExecutionIdOrderByStepOrder(executionId).stream()
             .filter(s -> s.getStepOrder() == stepOrder && "REJECTED".equals(s.getReviewStatus()))
             .count();
+    }
+
+    private Map<String, String> rebuildNodeOutputs(UUID executionId) {
+        Map<String, String> outputs = new HashMap<>();
+        for (ExecutionStep step : stepRepository.findByExecutionIdOrderByStepOrder(executionId)) {
+            if (step.getNodeId() != null && "COMPLETED".equals(step.getStatus())
+                    && step.getOutputData() != null && !step.getOutputData().isBlank()) {
+                outputs.put(step.getNodeId(), step.getOutputData());
+            }
+        }
+        return outputs;
+    }
+
+    private String contextFor(String fallback, StepPlan sp, Map<String, String> nodeOutputs) {
+        if (sp.nodeId == null || sp.upstreams.isEmpty()) {
+            return fallback;
+        }
+        StringBuilder context = new StringBuilder();
+        for (String upstream : sp.upstreams) {
+            String output = nodeOutputs.get(upstream);
+            if (output == null || output.isBlank()) {
+                continue;
+            }
+            if (context.length() > 0) {
+                context.append("\n\n");
+            }
+            context.append(output);
+        }
+        return context.length() > 0 ? context.toString() : fallback;
     }
 
     private void createArtifactsFromOutput(Execution execution, List<MissionFlow> missionFlows,
@@ -531,7 +653,9 @@ public class ExecutionOrchestrator {
             artifact.setContentType("text/markdown");
             artifact.setReviewStatus("PENDING");
             artifact.setPublicationStatus("UNPUBLISHED");
+            artifactStorageService.persist(artifact, missionId);
             artifactRepository.save(artifact);
+            embeddingService.indexArtifact(artifact.getId(), artifact.getContentText());
         }
     }
 
@@ -543,6 +667,7 @@ public class ExecutionOrchestrator {
             String output = step.getOutputData();
             if (output == null || output.isBlank()) continue;
             if ("IMAGE".equals(step.getStepType()) || "TTS".equals(step.getStepType())
+                    || "MUSIC_GENERATION".equals(step.getStepType())
                     || "VIDEO_GENERATION".equals(step.getStepType()) || "PUBLISH".equals(step.getStepType())) {
                 continue;
             }
@@ -648,11 +773,27 @@ public class ExecutionOrchestrator {
         final UUID flowId;
         final UUID agentId;
         final String kind;
+        final String nodeId;
+        final List<String> upstreams;
 
         StepPlan(UUID flowId, UUID agentId, String kind) {
+            this(flowId, agentId, kind, null, Collections.emptyList());
+        }
+
+        StepPlan(UUID flowId, UUID agentId, String kind, String nodeId, List<String> upstreams) {
             this.flowId = flowId;
             this.agentId = agentId;
             this.kind = kind;
+            this.nodeId = nodeId;
+            this.upstreams = upstreams == null ? Collections.emptyList() : upstreams;
+        }
+    }
+
+    private static class DesignPlanHolder {
+        final List<DesignPlan.Node> nodes;
+
+        DesignPlanHolder(List<DesignPlan.Node> nodes) {
+            this.nodes = nodes;
         }
     }
 

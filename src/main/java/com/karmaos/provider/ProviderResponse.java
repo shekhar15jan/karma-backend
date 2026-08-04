@@ -22,6 +22,8 @@ public class ProviderResponse {
     private List<String> models;
     private List<String> capabilities;
     private String status;
+    private boolean apiKeyConfigured;
+    private boolean keyRequired;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

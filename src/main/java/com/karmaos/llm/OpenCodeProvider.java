@@ -53,6 +53,36 @@ public class OpenCodeProvider implements LLMProvider {
     }
 
     @Override
+    public List<String> fetchAvailableModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            String modelsUrl = baseUrl;
+            if (modelsUrl.endsWith("/chat/completions")) {
+                modelsUrl = modelsUrl.substring(0, modelsUrl.length() - "/chat/completions".length());
+            }
+            if (!modelsUrl.endsWith("/models")) {
+                modelsUrl = modelsUrl + "/models";
+            }
+            var requestSpec = webClient.get().uri(modelsUrl);
+            if (apiKey != null && !apiKey.isBlank()) {
+                requestSpec = requestSpec.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
+            }
+            JsonNode response = requestSpec.retrieve().bodyToMono(JsonNode.class).block();
+            if (response != null && response.hasNonNull("data")) {
+                for (JsonNode m : response.get("data")) {
+                    String id = m.path("id").asText("");
+                    if (!id.isBlank() && !result.contains(id)) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("OpenCode model discovery failed: {}", e.getMessage());
+        }
+        return result.isEmpty() ? getAvailableModels() : result;
+    }
+
+    @Override
     public LLMResponse chat(LLMRequest request) {
         long start = System.currentTimeMillis();
         try {
