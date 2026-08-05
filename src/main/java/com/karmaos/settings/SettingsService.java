@@ -29,7 +29,13 @@ public class SettingsService {
     private static final Map<String, Object> DEFAULT_SETTINGS = Map.of(
         RuntimeSettings.KEY_MAX_TOKENS_DEFAULT, 1024,
         RuntimeSettings.KEY_MAX_TOKENS_REASONING, 4096,
-        RuntimeSettings.KEY_MUSIC_MAX_DURATION, 30
+        RuntimeSettings.KEY_MAX_TOKENS_SCRIPT, 8192,
+        RuntimeSettings.KEY_MUSIC_MAX_DURATION, 30,
+        RuntimeSettings.KEY_VIDEO_TARGET_DURATION, 900,
+        RuntimeSettings.KEY_VIDEO_MIN_SCENES, 30,
+        RuntimeSettings.KEY_VIDEO_MAX_SCENES, 36,
+        RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 70,
+        RuntimeSettings.KEY_VIDEO_FFMPEG_TIMEOUT, 1200
     );
 
     public SettingsResponse getByWorkspaceAndUser(UUID workspaceId, UUID userId) {

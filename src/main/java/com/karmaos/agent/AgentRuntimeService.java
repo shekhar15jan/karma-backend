@@ -127,7 +127,7 @@ public class AgentRuntimeService {
             step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
 
             LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
-                    systemPrompt, userMessage, missionId, resolveMaxTokens(flow));
+                    systemPrompt, userMessage, missionId, resolveMaxTokens(flow, agent, missionId));
             String modelUsed = step.getModelUsed();
 
             step.setPromptTokens(response.getPromptTokens());
@@ -294,6 +294,7 @@ public class AgentRuntimeService {
         }
 
         if (isStoryScriptWriter(agent)) {
+            StoryTarget target = configuredStoryTarget(agent, missionId);
             sb.append("\n\nOUTPUT FORMAT REQUIREMENT (MANDATORY):\n")
               .append("If the upstream context instructs you to write a story / narration script for a video, ")
               .append("respond with a single valid JSON object (no markdown fences) conforming to this exact schema:\n")
@@ -301,14 +302,22 @@ public class AgentRuntimeService {
               .append("  \"title\": \"short title of the story\",\n")
               .append("  \"script_body\": [\n")
               .append("    { \"scene_number\": 1,\n")
-              .append("      \"speaker_text\": \"exact narration sentence to be spoken for this scene\",\n")
+              .append("      \"speaker_text\": \"exact narration to be spoken for this scene\",\n")
               .append("      \"image_prompt\": \"detailed visual description used to generate this scene's picture\",\n")
               .append("      \"visual_description\": \"what appears on screen\" }\n")
               .append("  ]\n")
               .append("}\n")
-              .append("Write 5 to 7 concise scenes for a self-contained story. Each speaker_text must be one or two ")
-              .append("complete spoken sentences. Each image_prompt must be a self-contained, vivid visual description ")
-              .append("suitable for an image generator. Make the story wholesome, complete, and non-branded.");
+              .append("You MUST write a full-length script that assembles into a target video of roughly ")
+              .append(target.targetDurationSeconds).append(" seconds. Write exactly ").append(target.minScenes)
+              .append(" to ").append(target.maxScenes).append(" scenes. ")
+              .append("Each speaker_text must be a complete spoken paragraph of about ")
+              .append(target.wordsPerScene)
+              .append("-").append(target.wordsPerScene + 25)
+              .append(" words (spoken at ~2.3 words per second, so each scene is roughly ")
+              .append(Math.round(target.wordsPerScene / 2.3)).append("-").append(Math.round((target.wordsPerScene + 25) / 2.3))
+              .append(" seconds). Keep characters visually consistent in appearance, colours and outfits across ALL scenes. ")
+              .append("Each image_prompt must be a self-contained, vivid visual description suitable for an image generator. ")
+              .append("Make the story wholesome, complete, and non-branded.");
         }
 
         return sb.toString();
@@ -320,6 +329,53 @@ public class AgentRuntimeService {
         String c = agent.getCategory() != null ? agent.getCategory().toLowerCase() : "";
         return n.contains("script") || n.contains("story") || n.contains("narrat")
             || c.contains("script") || c.contains("story");
+    }
+
+    private StoryTarget configuredStoryTarget(Agent agent, UUID missionId) {
+        int targetDuration = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_TARGET_DURATION, 900);
+        int minScenes = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_MIN_SCENES, 30);
+        int maxScenes = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_MAX_SCENES, 36);
+        int wordsPerScene = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 70);
+
+        if (agent != null && agent.getConfiguration() != null && !agent.getConfiguration().isBlank()) {
+            try {
+                JsonNode config = objectMapper.readTree(agent.getConfiguration());
+                if (config.has("targetDurationSeconds") && config.get("targetDurationSeconds").isInt()) {
+                    targetDuration = Math.max(30, config.get("targetDurationSeconds").asInt());
+                }
+                if (config.has("minScenes") && config.get("minScenes").isInt()) {
+                    minScenes = Math.max(1, config.get("minScenes").asInt());
+                }
+                if (config.has("maxScenes") && config.get("maxScenes").isInt()) {
+                    maxScenes = Math.max(minScenes, config.get("maxScenes").asInt());
+                }
+                if (config.has("wordsPerScene") && config.get("wordsPerScene").isInt()) {
+                    wordsPerScene = Math.max(10, config.get("wordsPerScene").asInt());
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (missionId != null) {
+            try {
+                Mission mission = missionRepository.findById(missionId).orElse(null);
+                if (mission != null && mission.getTargetDurationSeconds() != null && mission.getTargetDurationSeconds() > 0) {
+                    targetDuration = Math.max(30, mission.getTargetDurationSeconds());
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        return new StoryTarget(targetDuration, minScenes, maxScenes, wordsPerScene);
+    }
+
+    private record StoryTarget(int targetDurationSeconds, int minScenes, int maxScenes, int wordsPerScene) {
+        StoryTarget {
+            if (targetDurationSeconds <= 0) targetDurationSeconds = 900;
+            if (minScenes <= 0) minScenes = 30;
+            if (maxScenes < minScenes) maxScenes = minScenes;
+            if (wordsPerScene <= 0) wordsPerScene = 70;
+        }
     }
 
     private String configuredMemoryMode(Agent agent) {
@@ -398,15 +454,27 @@ public class AgentRuntimeService {
      * steps (planning, content, review) use the reasoning tier; lighter steps use
      * the default tier.
      */
-    private int resolveMaxTokens(Flow flow) {
+    private int resolveMaxTokens(Flow flow, Agent agent, UUID missionId) {
         String category = flow != null && flow.getCategory() != null
                 ? flow.getCategory().toUpperCase(Locale.ROOT) : "";
         boolean reasoningTier = "PLANNING".equals(category)
                 || "CONTENT".equals(category)
                 || "REVIEW".equals(category);
-        return reasoningTier
+        int reasoning = reasoningTier
                 ? runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_REASONING, 4096)
                 : runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_DEFAULT, 1024);
+        if (isStoryScriptWriter(agent)) {
+            int modelOutputCap = runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_SCRIPT, 8192);
+            StoryTarget target = configuredStoryTarget(agent, missionId);
+            int needed = Math.max(target.maxScenes(), target.minScenes()) * 220;
+            int budget = Math.min(needed, modelOutputCap);
+            if (budget > reasoning) {
+                log.info("Story script target {} scenes needs ~{} tokens; raising budget from {} to {} (capped at model output cap)",
+                        Math.max(target.maxScenes(), target.minScenes()), needed, reasoning, budget);
+                return budget;
+            }
+        }
+        return reasoning;
     }
 
     private double resolveTemperature(Agent agent) {

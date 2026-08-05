@@ -16,8 +16,15 @@ public class RuntimeSettings {
 
     public static final String KEY_MAX_TOKENS_DEFAULT = "llm.max_tokens.default";
     public static final String KEY_MAX_TOKENS_REASONING = "llm.max_tokens.reasoning";
+    public static final String KEY_MAX_TOKENS_SCRIPT = "llm.max_tokens.script";
     public static final String KEY_MUSIC_MAX_DURATION = "music.max_duration_seconds";
     public static final String KEY_GOOGLE_SEARCH_GROUNDING = "llm.google_search_grounding";
+
+    public static final String KEY_VIDEO_TARGET_DURATION = "video.target_duration_seconds";
+    public static final String KEY_VIDEO_MIN_SCENES = "video.min_scenes";
+    public static final String KEY_VIDEO_MAX_SCENES = "video.max_scenes";
+    public static final String KEY_VIDEO_WORDS_PER_SCENE = "video.words_per_scene";
+    public static final String KEY_VIDEO_FFMPEG_TIMEOUT = "video.ffmpeg_timeout_seconds";
 
     private final SettingsRepository settingsRepository;
     private final ObjectMapper objectMapper;

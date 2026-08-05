@@ -33,14 +33,14 @@ public class ProviderService {
 
 private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode",
-            "edge-tts", "edge", "ffmpeg", "google-music", "pollinations", "pollinations-image");
+            "edge-tts", "edge", "ffmpeg", "google-music", "pollinations", "pollinations-image", "cloudflare");
 
     private static final Set<String> LLM_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode");
 
     private static final Set<String> VOICE_TYPES = Set.of("edge-tts", "edge");
 
-    private static final Set<String> IMAGE_TYPES = Set.of("google", "gemini", "pollinations", "pollinations-image");
+    private static final Set<String> IMAGE_TYPES = Set.of("google", "gemini", "pollinations", "pollinations-image", "cloudflare");
 
     private static final Set<String> MUSIC_TYPES = Set.of("google-music");
 
@@ -211,7 +211,7 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
                 if (apiKey.isBlank() && !"pollinations".equals(type) && !"pollinations-image".equals(type)) {
                     return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
                 }
-                ok = imageProviderFactory.getProvider(type, apiKey).testConnection();
+                ok = imageProviderFactory.getProvider(type, apiKey, apiEndpoint).testConnection();
             } else if ("ffmpeg".equals(type)) {
                 ok = videoProviderFactory.getProvider(type, apiKey).testConnection();
             } else {
@@ -267,7 +267,7 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             return voiceProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
         }
         if (IMAGE_TYPES.contains(type)) {
-            return imageProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
+            return imageProviderFactory.getProvider(type, apiKey, apiEndpoint).fetchAvailableModels();
         }
         return null;
     }

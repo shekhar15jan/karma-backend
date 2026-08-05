@@ -54,4 +54,7 @@ public class Mission extends BaseEntity {
 
     @Column(name = "output_directory", length = 500)
     private String outputDirectory;
+
+    @Column(name = "target_duration_seconds")
+    private Integer targetDurationSeconds;
 }

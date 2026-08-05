@@ -82,6 +82,7 @@ ExecutionRepository executionRepository,
         mission.setPriority(normalizePriority(request.getPriority()));
         mission.setProviderId(request.getProviderId());
         mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
+        mission.setTargetDurationSeconds(normalizeDuration(request.getTargetDurationSeconds()));
         mission.setStatus("DRAFT");
         mission.setProgress(0);
         mission = missionRepository.save(mission);
@@ -123,6 +124,13 @@ ExecutionRepository executionRepository,
         return p;
     }
 
+    private Integer normalizeDuration(Integer targetDurationSeconds) {
+        if (targetDurationSeconds == null || targetDurationSeconds <= 0) {
+            return null;
+        }
+        return Math.max(30, targetDurationSeconds);
+    }
+
     private void linkFlowsToMission(Mission mission, MissionRequest request) {
         List<UUID> selectedFlowIds = request.getSelectedFlowIds();
 
@@ -161,6 +169,7 @@ ExecutionRepository executionRepository,
         validateProvider(request.getProviderId());
         mission.setProviderId(request.getProviderId());
         mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
+        mission.setTargetDurationSeconds(normalizeDuration(request.getTargetDurationSeconds()));
         mission = missionRepository.save(mission);
         relinkFlowsToMission(mission, request);
         return toResponse(mission);
@@ -219,6 +228,7 @@ ExecutionRepository executionRepository,
                 .providerId(m.getProviderId())
                 .progress(m.getProgress())
                 .outputDirectory(m.getOutputDirectory())
+                .targetDurationSeconds(m.getTargetDurationSeconds())
                 .startedAt(m.getStartedAt())
                 .completedAt(m.getCompletedAt())
                 .createdAt(m.getCreatedAt())

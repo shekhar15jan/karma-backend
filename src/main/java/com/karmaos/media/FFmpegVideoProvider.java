@@ -1,5 +1,6 @@
 package com.karmaos.media;
 
+import com.karmaos.settings.RuntimeSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +36,12 @@ public class FFmpegVideoProvider implements VideoProvider {
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(30))
         .build();
+
+    private final RuntimeSettings runtimeSettings;
+
+    public FFmpegVideoProvider(RuntimeSettings runtimeSettings) {
+        this.runtimeSettings = runtimeSettings;
+    }
 
     @Override
     public String getName() { return "FFmpeg"; }
@@ -406,10 +413,11 @@ public class FFmpegVideoProvider implements VideoProvider {
             pb.redirectErrorStream(true);
             Process process = pb.start();
             String processOutput = readStream(process.getInputStream());
-            boolean finished = process.waitFor(300, TimeUnit.SECONDS);
+            int timeoutSeconds = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_FFMPEG_TIMEOUT, 1200);
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                log.error("FFmpeg timed out after 5 minutes");
+                log.error("FFmpeg timed out after {} minutes", timeoutSeconds / 60);
                 return false;
             }
             if (process.exitValue() != 0) {

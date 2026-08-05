@@ -8,6 +8,8 @@ import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.artifact.ArtifactStorageService;
 import com.karmaos.execution.ExecutionStep;
 import com.karmaos.execution.ExecutionService;
+import com.karmaos.mission.Mission;
+import com.karmaos.mission.MissionRepository;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
@@ -31,7 +33,7 @@ public class MediaOrchestrationService {
 
     private static final Logger log = LoggerFactory.getLogger(MediaOrchestrationService.class);
 
-    private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "pollinations", "pollinations-image");
+    private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "pollinations", "pollinations-image", "cloudflare");
     private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("google", "gemini", "edge-tts", "edge");
     private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("ffmpeg");
     private static final Set<String> MUSIC_PROVIDER_TYPES = Set.of("google-music");
@@ -54,6 +56,7 @@ public class MediaOrchestrationService {
     private final ExecutionService executionService;
     private final RuntimeSettings runtimeSettings;
     private final ObjectMapper objectMapper;
+    private final MissionRepository missionRepository;
 
     public MediaOrchestrationService(ImageProviderFactory imageProviderFactory,
                                       VoiceProviderFactory voiceProviderFactory,
@@ -67,7 +70,8 @@ public class MediaOrchestrationService {
                                       ArtifactStorageService artifactStorageService,
                                       ExecutionService executionService,
                                       RuntimeSettings runtimeSettings,
-                                      ObjectMapper objectMapper) {
+                                      ObjectMapper objectMapper,
+                                      MissionRepository missionRepository) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
         this.videoProviderFactory = videoProviderFactory;
@@ -81,6 +85,7 @@ public class MediaOrchestrationService {
         this.executionService = executionService;
         this.runtimeSettings = runtimeSettings;
         this.objectMapper = objectMapper;
+        this.missionRepository = missionRepository;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
@@ -88,9 +93,15 @@ public class MediaOrchestrationService {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "IMAGE_GENERATION", contextData, missionId);
 
         try {
-            Provider primaryProvider = resolveAgentPreferredProvider(agentId, IMAGE_PROVIDER_TYPES);
+            Provider primaryProvider = resolveMissionPreferredImageProvider(missionId);
             if (primaryProvider == null) {
-                primaryProvider = resolveProviderForCapability(IMAGE_PROVIDER_TYPES, "pollinations");
+                primaryProvider = resolveGeminiImageProvider(agentId);
+            }
+            if (primaryProvider == null) {
+                primaryProvider = resolveAgentPreferredProvider(agentId, IMAGE_PROVIDER_TYPES);
+                if (primaryProvider == null) {
+                    primaryProvider = resolveProviderForCapability(IMAGE_PROVIDER_TYPES, "pollinations");
+                }
             }
             if (primaryProvider == null) {
                 log.error("Image step failed: no image-capable provider is configured");
@@ -108,15 +119,27 @@ public class MediaOrchestrationService {
                 step.setCompletedAt(LocalDateTime.now());
                 return executionService.saveStep(executionId, step);
             }
-            ImageProvider primaryImageProvider = imageProviderFactory.getProvider(primaryProvider.getProviderType(), apiKey);
+            ImageProvider primaryImageProvider = imageProviderFactory.getProvider(primaryProvider.getProviderType(), apiKey, primaryProvider.getApiEndpoint());
             List<String> configuredModels = parseProviderModels(primaryProvider);
             if (primaryImageProvider instanceof GoogleImageProvider gip && !configuredModels.isEmpty()) {
                 gip.setConfiguredModels(configuredModels);
             }
-            ImageProvider fallbackProvider = isKeylessImage(primaryProvider) ? null
-                    : imageProviderFactory.getProvider("pollinations", null);
+            ImageProvider fallbackProvider;
+            if (isKeylessImage(primaryProvider)) {
+                fallbackProvider = primaryImageProvider;
+            } else {
+                fallbackProvider = imageProviderFactory.getProvider("pollinations", null);
+            }
+            ImageProvider localFallbackProvider = imageProviderFactory.getFallbackProvider();
 
             List<String> imagePrompts = buildScenePrompts(contextData);
+            String characterSheet = buildCharacterSheet(contextData);
+            long missionSeed = deterministicSeed(missionId);
+            if (characterSheet != null && !characterSheet.isBlank()) {
+                for (int ai = 0; ai < imagePrompts.size(); ai++) {
+                    imagePrompts.set(ai, characterSheet + "\n" + imagePrompts.get(ai));
+                }
+            }
             if (reviewerFeedback != null && !reviewerFeedback.isBlank() && imagePrompts.size() == 1 && !(imagePrompts.get(0).equals(contextData))) {
                 String corrected = imagePrompts.get(0);
                 imagePrompts.set(0, corrected + "\n\nREVIEWER FEEDBACK:\n" + reviewerFeedback);
@@ -128,7 +151,7 @@ public class MediaOrchestrationService {
             List<String> allUrls = new ArrayList<>();
             List<String> failures = new ArrayList<>();
             for (int i = 0; i < imagePrompts.size(); i++) {
-                String sceneUrl = tryGenerateScene(primaryImageProvider, fallbackProvider, imagePrompts.get(i), i);
+                String sceneUrl = tryGenerateScene(primaryImageProvider, fallbackProvider, imagePrompts.get(i), i, missionSeed);
                 if (sceneUrl != null) {
                     allUrls.add(sceneUrl);
                     persistImageArtifact(missionId, sceneUrl, i);
@@ -155,11 +178,12 @@ public class MediaOrchestrationService {
         return executionService.saveStep(executionId, step);
     }
 
-    private String tryGenerateScene(ImageProvider primary, ImageProvider fallback, String prompt, int sceneIndex) {
+    private String tryGenerateScene(ImageProvider primary, ImageProvider fallback, String prompt, int sceneIndex, Long seed) {
         ImageRequest request = new ImageRequest();
         request.setPrompt(prompt);
         request.setModel(primary.getDefaultModel());
         request.setN(1);
+        request.setSeed(seed);
         ImageResponse response = primary.generate(request);
         if (response.isSuccess() && response.getImageUrls() != null && !response.getImageUrls().isEmpty()) {
             return response.getImageUrls().get(0);
@@ -167,6 +191,7 @@ public class MediaOrchestrationService {
         log.warn("Primary image provider failed for scene {}: {}, trying fallback", sceneIndex, response.getErrorMessage());
         if (fallback != null) {
             request.setModel(fallback.getDefaultModel());
+            request.setSeed(seed);
             response = fallback.generate(request);
             if (response.isSuccess() && response.getImageUrls() != null && !response.getImageUrls().isEmpty()) {
                 return response.getImageUrls().get(0);
@@ -194,6 +219,34 @@ public class MediaOrchestrationService {
         return List.of();
     }
 
+    private boolean isImageContentType(String contentType) {
+        if (contentType == null) return false;
+        String t = contentType.toLowerCase();
+        return t.startsWith("image/");
+    }
+
+    private String resolveImageContentType(String url) {
+        if (url == null) return "image/png";
+        if (url.startsWith("image/jpeg") || url.startsWith("image/webp")) {
+            return url.split(";")[0];
+        }
+        int bodyStart = url.indexOf(',');
+        if (bodyStart >= 0) {
+            String base64 = url.substring(bodyStart + 1);
+            try {
+                byte[] bytes = java.util.Base64.getDecoder().decode(base64);
+                if (bytes.length >= 3 && bytes[0] == (byte)0xFF && bytes[1] == (byte)0xD8) {
+                    return "image/jpeg";
+                }
+                if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+                        && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+                    return "image/webp";
+                }
+            } catch (IllegalArgumentException ignored) { }
+        }
+        return "image/png";
+    }
+
     private void persistImageArtifact(UUID missionId, String url, int sceneIndex) {
         Artifact artifact = new Artifact();
         artifact.setMissionId(missionId);
@@ -201,7 +254,7 @@ public class MediaOrchestrationService {
         artifact.setArtifactType("MEDIA_ASSET");
         artifact.setStatus("COMPLETED");
         artifact.setContentText(url);
-        artifact.setContentType("image/png");
+        artifact.setContentType(resolveImageContentType(url));
         artifact.setReviewStatus("PENDING");
         artifact.setPublicationStatus("UNPUBLISHED");
         artifact.setStorageLocation(url);
@@ -246,6 +299,64 @@ public class MediaOrchestrationService {
             // not JSON â€” treat as single prompt below
         }
         return List.of(contextData);
+    }
+
+    private long deterministicSeed(UUID id) {
+        if (id == null) return 12345L;
+        return (id.getMostSignificantBits() ^ id.getLeastSignificantBits()) & 0x7FFFFFFFL;
+    }
+
+    private String buildCharacterSheet(String contextData) {
+        if (contextData == null || contextData.isBlank()) return null;
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = extractJsonNode(contextData);
+            if (root == null) return null;
+            java.util.Map<String, String> characters = new java.util.LinkedHashMap<>();
+            if (root.has("characters") && root.get("characters").isArray()) {
+                for (com.fasterxml.jackson.databind.JsonNode c : root.get("characters")) {
+                    String name = c.hasNonNull("name") ? c.get("name").asText() : null;
+                    String desc = null;
+                    for (String dk : List.of("visual_style_notes", "visual_style", "appearance", "description")) {
+                        if (c.hasNonNull(dk)) { desc = c.get(dk).asText(); break; }
+                    }
+                    if (name != null && !name.isBlank()) {
+                        characters.put(name, desc != null && !desc.isBlank() ? desc : null);
+                    }
+                }
+            } else {
+                List<String> masterKeys = new ArrayList<>();
+                if (root.has("script_body") && root.get("script_body").isArray()) {
+                    for (com.fasterxml.jackson.databind.JsonNode s : root.get("script_body")) {
+                        for (String k : List.of("image_prompt", "visual_description")) {
+                            if (s.hasNonNull(k) && !s.get(k).asText().isBlank()) {
+                                masterKeys.add(s.get(k).asText());
+                            }
+                        }
+                    }
+                }
+                String joined = String.join(" \n ", masterKeys);
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("(?i)\\b([A-Z][a-z]+) (the|the) ([A-Z][a-z]+)\\b")
+                        .matcher(joined);
+                while (m.find()) {
+                    characters.putIfAbsent(m.group(1) + " the " + m.group(3), null);
+                }
+            }
+
+            if (characters.isEmpty()) return null;
+            StringBuilder sheet = new StringBuilder("CHARACTER CONSISTENCY: keep these characters visually identical in appearance, colours and outfits across all panels:");
+            for (Map.Entry<String, String> e : characters.entrySet()) {
+                if (sheet.length() > 900) break;
+                sheet.append("\n- ").append(e.getKey());
+                if (e.getValue() != null && !e.getValue().isBlank()) {
+                    String style = e.getValue().length() > 90 ? e.getValue().substring(0, 90) : e.getValue();
+                    sheet.append(": ").append(style);
+                }
+            }
+            return sheet.toString();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public ExecutionStep executeVoiceStep(UUID executionId, UUID flowId, UUID agentId,
@@ -404,7 +515,7 @@ public class MediaOrchestrationService {
             for (Artifact a : artifacts) {
                 if ("AUDIO".equals(a.getArtifactType()) && audioUrl == null) {
                     audioUrl = a.getStorageLocation();
-                } else if ("MEDIA_ASSET".equals(a.getArtifactType()) && "image/png".equals(a.getContentType())) {
+                } else if ("MEDIA_ASSET".equals(a.getArtifactType()) && isImageContentType(a.getContentType())) {
                     if (a.getStorageLocation() != null) {
                         Integer sceneIndex = extractSceneIndex(a.getMetadata());
                         if (sceneIndex != null) {
@@ -623,6 +734,59 @@ public class MediaOrchestrationService {
 
         step.setCompletedAt(LocalDateTime.now());
         return executionService.saveStep(executionId, step);
+    }
+
+    private Provider resolveGeminiImageProvider(UUID agentId) {
+        try {
+            List<Provider> candidates = providerRepository.findByStatus("CONNECTED").stream()
+                    .filter(p -> p.getDeletedAt() == null)
+                    .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
+                    .toList();
+            if (agentId != null) {
+                Agent agent = agentRepository.findById(agentId).orElse(null);
+                if (agent != null && agent.getDefaultProviderId() != null) {
+                    Provider preferred = candidates.stream()
+                            .filter(p -> p.getId().equals(agent.getDefaultProviderId()))
+                            .filter(p -> isGoogleImageProvider(p))
+                            .findFirst().orElse(null);
+                    if (preferred != null && !getApiKey(preferred).isEmpty()) {
+                        return preferred;
+                    }
+                }
+            }
+            Provider gemini = candidates.stream()
+                    .filter(this::isGoogleImageProvider)
+                    .filter(p -> !getApiKey(p).isEmpty())
+                    .findFirst().orElse(null);
+            return gemini;
+        } catch (Exception e) {
+            log.warn("Gemini image provider resolution failed: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private boolean isGoogleImageProvider(Provider p) {
+        if (p == null || p.getProviderType() == null) return false;
+        String t = p.getProviderType().toLowerCase();
+        return "google".equals(t) || "gemini".equals(t);
+    }
+
+    private Provider resolveMissionPreferredImageProvider(UUID missionId) {
+        if (missionId == null) return null;
+        try {
+            Mission mission = missionRepository.findById(missionId).orElse(null);
+            if (mission == null || mission.getProviderId() == null) return null;
+            Provider preferred = providerRepository.findById(mission.getProviderId()).orElse(null);
+            if (preferred == null || preferred.getDeletedAt() != null) return null;
+            if (!"CONNECTED".equalsIgnoreCase(preferred.getStatus())) return null;
+            if (preferred.getProviderType() != null
+                    && IMAGE_PROVIDER_TYPES.contains(preferred.getProviderType().toLowerCase())) {
+                return preferred;
+            }
+        } catch (Exception e) {
+            log.warn("Mission image provider resolution failed for mission {}: {}", missionId, e.getMessage());
+        }
+        return null;
     }
 
     private Provider resolveAgentPreferredProvider(UUID agentId, Set<String> capabilityTypes) {

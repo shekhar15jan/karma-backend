@@ -1,5 +1,6 @@
 package com.karmaos.media;
 
+import com.karmaos.settings.RuntimeSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -15,10 +16,12 @@ public class VideoProviderFactory {
     private static final Logger log = LoggerFactory.getLogger(VideoProviderFactory.class);
 
     private final WebClient.Builder webClientBuilder;
+    private final RuntimeSettings runtimeSettings;
     private final Map<String, VideoProvider> providerCache = new ConcurrentHashMap<>();
 
-    public VideoProviderFactory(WebClient.Builder webClientBuilder) {
+    public VideoProviderFactory(WebClient.Builder webClientBuilder, RuntimeSettings runtimeSettings) {
         this.webClientBuilder = webClientBuilder;
+        this.runtimeSettings = runtimeSettings;
     }
 
     public VideoProvider getProvider(String providerType, String apiKey) {
@@ -33,7 +36,7 @@ public class VideoProviderFactory {
     private VideoProvider createProvider(String providerType, String apiKey) {
         if (providerType == null) return getFallbackProvider();
         return switch (providerType.toLowerCase()) {
-            case "ffmpeg" -> new FFmpegVideoProvider();
+            case "ffmpeg" -> new FFmpegVideoProvider(runtimeSettings);
             default -> {
                 log.warn("Unsupported video provider type: {}, using mock", providerType);
                 yield getFallbackProvider();
