@@ -107,6 +107,8 @@ public class ExecutionOrchestrator {
         Mission mission = missionRepository.findById(missionId)
             .orElseThrow(() -> new RuntimeException("Mission not found: " + missionId));
 
+        requireMissionTopic(mission);
+
         mission.setStatus("RUNNING");
         mission.setStartedAt(LocalDateTime.now());
         missionRepository.save(mission);
@@ -700,6 +702,25 @@ public class ExecutionOrchestrator {
     public boolean isActive(UUID executionId) {
         CompletableFuture<Void> future = activeExecutions.get(executionId);
         return future != null && !future.isDone();
+    }
+
+    private void requireMissionTopic(Mission mission) {
+        String name = mission.getName() != null ? mission.getName().trim() : "";
+        String description = mission.getDescription() != null ? mission.getDescription().trim() : "";
+        String lowerName = name.toLowerCase();
+        boolean genericName = name.isBlank()
+            || "untitled".equals(lowerName)
+            || "video".equals(lowerName)
+            || "video workflow".equals(lowerName)
+            || "workflow".equals(lowerName)
+            || "mission".equals(lowerName)
+            || "blog".equals(lowerName)
+            || "thumbnail".equals(lowerName);
+        if (genericName && description.isBlank()) {
+            throw new RuntimeException(
+                "No mission topic provided. Set a meaningful mission name or description (the topic/brief "
+                    + "for this video) before triggering execution.");
+        }
     }
 
     private void updateMissionStatus(UUID missionId, String status) {

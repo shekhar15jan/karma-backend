@@ -6,9 +6,6 @@ import org.slf4j.LoggerFactory;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
-import java.awt.font.FontRenderContext;
-import java.awt.font.TextLayout;
-import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.URI;
@@ -126,8 +123,7 @@ public class FFmpegVideoProvider implements VideoProvider {
                 sceneIdx++;
                 if (scene.getText() == null || scene.getText().isBlank()) continue;
 
-                String title = request.getTitle() != null ? request.getTitle() : "";
-                Path frame = renderSceneFrame(scene, title, width, height, tempDir, sceneIdx);
+                Path frame = renderSceneFrame(scene, width, height, tempDir, sceneIdx);
                 int duration = scene.getDurationSeconds() > 0
                     ? scene.getDurationSeconds()
                     : estimateDurationSeconds(scene.getText());
@@ -217,7 +213,7 @@ public class FFmpegVideoProvider implements VideoProvider {
         }
     }
 
-    private Path renderSceneFrame(VideoScene scene, String title, int width, int height,
+    private Path renderSceneFrame(VideoScene scene, int width, int height,
                                   Path tempDir, int idx) throws IOException {
         BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = canvas.createGraphics();
@@ -232,8 +228,6 @@ public class FFmpegVideoProvider implements VideoProvider {
                 BufferedImage bgImg = ImageIO.read(bg.toFile());
                 if (bgImg != null) {
                     g.drawImage(bgImg, 0, 0, width, height, null);
-                    g.setColor(new Color(0, 0, 0, 150));
-                    g.fillRect(0, 0, width, height);
                 }
             } catch (Exception e) {
                 log.warn("Scene {} background failed, using gradient: {}", idx, e.getMessage());
@@ -241,19 +235,6 @@ public class FFmpegVideoProvider implements VideoProvider {
             }
         } else {
             paintGradient(g, width, height, idx);
-        }
-
-        if (title != null && !title.isBlank()) {
-            g.setFont(new Font("SansSerif", Font.BOLD, Math.max(28, width / 42)));
-            g.setColor(new Color(255, 255, 255, 220));
-            drawCenteredText(g, title, width, (int) (height * 0.10), width - 200);
-        }
-
-        String text = scene.getText();
-        if (text != null && !text.isBlank()) {
-            g.setFont(new Font("SansSerif", Font.BOLD, Math.max(32, width / 32)));
-            g.setColor(Color.WHITE);
-            drawWrappedCenteredText(g, text, width, (int) (height * 0.42), (int) (height * 0.5), width - 240);
         }
 
         g.dispose();
@@ -268,53 +249,6 @@ public class FFmpegVideoProvider implements VideoProvider {
         Color c2 = Color.getHSBColor(((base + 60) % 360) / 360f, 0.55f, 0.30f);
         g.setPaint(new GradientPaint(0, 0, c1, width, height, c2));
         g.fillRect(0, 0, width, height);
-    }
-
-    private void drawCenteredText(Graphics2D g, String text, int width, int y, int maxWidth) {
-        Font font = g.getFont();
-        FontRenderContext frc = g.getFontRenderContext();
-        TextLayout layout = new TextLayout(text, font, frc);
-        Rectangle2D bounds = layout.getBounds();
-        float x = (float) ((width - bounds.getWidth()) / 2 - bounds.getX());
-        layout.draw(g, x, y);
-    }
-
-    private void drawWrappedCenteredText(Graphics2D g, String text, int width, int centerY,
-                                         int maxHeight, int maxWidth) {
-        List<String> lines = wrapText(text, maxWidth, g.getFontMetrics());
-        int lineHeight = g.getFontMetrics().getHeight();
-        int totalHeight = lines.size() * lineHeight;
-        if (totalHeight > maxHeight) {
-            while (totalHeight > maxHeight && lines.size() > 1) {
-                lines.remove(lines.size() - 1);
-                totalHeight = lines.size() * lineHeight;
-            }
-        }
-        int y = centerY - totalHeight / 2 + g.getFontMetrics().getAscent();
-        for (String line : lines) {
-            drawCenteredText(g, line, width, y, maxWidth);
-            y += lineHeight;
-        }
-    }
-
-    private List<String> wrapText(String text, int maxWidth, FontMetrics fm) {
-        List<String> result = new ArrayList<>();
-        for (String paragraph : text.split("\n")) {
-            if (paragraph.isBlank()) continue;
-            String[] words = paragraph.split("\\s+");
-            StringBuilder line = new StringBuilder();
-            for (String word : words) {
-                String candidate = line.length() == 0 ? word : line + " " + word;
-                if (fm.stringWidth(candidate) > maxWidth && line.length() > 0) {
-                    result.add(line.toString());
-                    line = new StringBuilder(word);
-                } else {
-                    line = new StringBuilder(candidate);
-                }
-            }
-            if (line.length() > 0) result.add(line.toString());
-        }
-        return result;
     }
 
     private boolean buildSceneSegment(String ffmpegPath, Path frame, Path audio,

@@ -50,16 +50,16 @@ public class GoogleImageProvider implements ImageProvider {
     private List<String> effectiveModels() {
         if (configuredModels != null && !configuredModels.isEmpty()) {
             List<String> result = new ArrayList<>();
-            // 1) free-tier multimodal flash models that can return inline images
+            // 1) dedicated image-generation models first (most reliable)
+            configuredModels.stream()
+                    .filter(m -> m.toLowerCase().contains("-image") || m.toLowerCase().startsWith("imagen"))
+                    .forEach(m -> { if (!result.contains(m)) result.add(m); });
+            // 2) free-tier multimodal flash models that can return inline images
             configuredModels.stream()
                     .filter(m -> {
                         String lm = m.toLowerCase();
                         return lm.contains("flash") && !lm.contains("-image") && !lm.startsWith("imagen");
                     })
-                    .forEach(m -> { if (!result.contains(m)) result.add(m); });
-            // 2) dedicated image-generation models
-            configuredModels.stream()
-                    .filter(m -> m.toLowerCase().contains("image") || m.toLowerCase().startsWith("imagen"))
                     .forEach(m -> { if (!result.contains(m)) result.add(m); });
             return result.isEmpty() ? configuredModels : result;
         }

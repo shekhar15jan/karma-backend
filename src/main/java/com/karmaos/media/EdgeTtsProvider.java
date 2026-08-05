@@ -31,7 +31,7 @@ public class EdgeTtsProvider implements VoiceProvider {
         "ja-JP-NanamiNeural", "zh-CN-XiaoxiaoNeural"
     );
 
-    private static final String DEFAULT_VOICE = "en-IN-NeerjaNeural";
+    private static final String DEFAULT_VOICE = "en-IN-PrabhatNeural";
     private static final String EDGE_TTS_CMD = "python";
     private static final String EDGE_TTS_MODULE = "-m";
     private static final String EDGE_TTS_MODULE_NAME = "edge_tts";

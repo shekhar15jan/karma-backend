@@ -19,7 +19,7 @@ public class VoiceTtsService {
 
     private static final Map<String, String> LANGUAGE_VOICE_MAP = new LinkedHashMap<>();
     static {
-        LANGUAGE_VOICE_MAP.put("en", "en-IN-NeerjaNeural");
+        LANGUAGE_VOICE_MAP.put("en", "en-IN-PrabhatNeural");
         LANGUAGE_VOICE_MAP.put("hi", "hi-IN-SwaraNeural");
         LANGUAGE_VOICE_MAP.put("mr", "mr-IN-AarohiNeural");
         LANGUAGE_VOICE_MAP.put("ta", "ta-IN-PallaviNeural");
@@ -76,7 +76,7 @@ public class VoiceTtsService {
                 ? request.getLanguage().toLowerCase() : "en";
         String voice = request.getVoice();
         if (voice == null || voice.isBlank()) {
-            voice = LANGUAGE_VOICE_MAP.getOrDefault(language, "en-IN-NeerjaNeural");
+            voice = LANGUAGE_VOICE_MAP.getOrDefault(language, "en-IN-PrabhatNeural");
         }
 
         try {
