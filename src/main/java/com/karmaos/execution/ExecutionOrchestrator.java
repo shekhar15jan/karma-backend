@@ -15,6 +15,7 @@ import com.karmaos.junction.FlowAgent;
 import com.karmaos.junction.FlowAgentRepository;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowRepository;
+import com.karmaos.junction.AgentSkillRepository;
 import com.karmaos.media.MediaOrchestrationService;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
@@ -47,6 +48,7 @@ public class ExecutionOrchestrator {
     private final MissionFlowRepository missionFlowRepository;
     private final FlowRepository flowRepository;
     private final FlowAgentRepository flowAgentRepository;
+    private final AgentSkillRepository agentSkillRepository;
     private final AgentRepository agentRepository;
     private final ExecutionRepository executionRepository;
     private final ExecutionStepRepository stepRepository;
@@ -67,6 +69,7 @@ public class ExecutionOrchestrator {
                                  MissionFlowRepository missionFlowRepository,
                                  FlowRepository flowRepository,
                                  FlowAgentRepository flowAgentRepository,
+                                 AgentSkillRepository agentSkillRepository,
                                  AgentRepository agentRepository,
                                  ExecutionRepository executionRepository,
                                  ExecutionStepRepository stepRepository,
@@ -83,6 +86,7 @@ public class ExecutionOrchestrator {
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
         this.flowAgentRepository = flowAgentRepository;
+        this.agentSkillRepository = agentSkillRepository;
         this.agentRepository = agentRepository;
         this.executionRepository = executionRepository;
         this.stepRepository = stepRepository;
@@ -475,7 +479,15 @@ public class ExecutionOrchestrator {
 
             for (FlowAgent fa : flowAgents) {
                 Agent agent = fa.getId() != null ? agentRepository.findById(fa.getId().getAgentId()).orElse(null) : null;
+                if (agent != null && agentSkillRepository.findByIdAgentId(agent.getId()).isEmpty()) {
+                    throw new RuntimeException("Agent '" + agent.getName() + "' has no skills assigned. "
+                        + "Skills are a mandatory behavioral contract; assign a skill before executing.");
+                }
                 String kind = resolveStepKind(category, agent);
+                if ("IMAGE".equals(kind) && "VIDEO".equalsIgnoreCase(category)) {
+                    log.info("Dropping IMAGE step from VIDEO flow plan as per B5");
+                    continue;
+                }
                 if (isMediaKind(kind)) {
                     mediaFlows.add(flowId);
                 }
@@ -512,7 +524,15 @@ public class ExecutionOrchestrator {
         String category = flow.getCategory() != null ? flow.getCategory() : "";
         for (DesignPlan.Node node : design.nodes) {
             Agent agent = node.agentId != null ? agentRepository.findById(node.agentId).orElse(null) : null;
+            if (agent != null && agentSkillRepository.findByIdAgentId(agent.getId()).isEmpty()) {
+                throw new RuntimeException("Agent '" + agent.getName() + "' has no skills assigned. "
+                    + "Skills are a mandatory behavioral contract; assign a skill before executing.");
+            }
             String kind = resolveDesignKind(node.stepKind, category, agent);
+            if ("IMAGE".equals(kind) && "VIDEO".equalsIgnoreCase(category)) {
+                log.info("Dropping IMAGE step from VIDEO flow plan as per B5");
+                continue;
+            }
             if (isMediaKind(kind)) {
                 mediaFlows.add(flowId);
             }

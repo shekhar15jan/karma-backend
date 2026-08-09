@@ -116,17 +116,46 @@ public class FFmpegVideoProvider implements VideoProvider {
             int width = parseWidth(request.getResolution());
             int height = parseHeight(request.getResolution());
 
+            Path masterAudio = null;
+            int masterDuration = 0;
+            if (request.getAudioUrl() != null && !request.getAudioUrl().isBlank()) {
+                try {
+                    masterAudio = downloadFile(request.getAudioUrl(), tempDir, "master_audio");
+                    masterDuration = getAudioDurationSeconds(ffmpegPath, masterAudio);
+                    log.info("Master narration audio: {} seconds", masterDuration);
+                } catch (Exception e) {
+                    log.warn("Master audio download failed: {}", e.getMessage());
+                    masterAudio = null;
+                }
+            }
+
             List<Path> segmentFiles = new ArrayList<>();
-            List<Path> allAudios = new ArrayList<>();
             int sceneIdx = 0;
+            int totalWords = 0;
             for (VideoScene scene : request.getScenes()) {
+                if (scene.getText() == null || scene.getText().isBlank()) continue;
+                totalWords += wordCount(scene.getText());
+            }
+            if (totalWords == 0) totalWords = Math.max(1, request.getScenes().size());
+
+            int[] durations = new int[request.getScenes().size()];
+            for (int i = 0; i < request.getScenes().size(); i++) {
+                VideoScene scene = request.getScenes().get(i);
+                if (scene.getText() == null || scene.getText().isBlank()) continue;
+                durations[i] = estimateDurationSeconds(scene.getText());
+            }
+
+            if (masterAudio != null && masterDuration > 0) {
+                durations = distributeDuration(masterDuration, request.getScenes(), totalWords);
+            }
+
+            for (int i = 0; i < request.getScenes().size(); i++) {
+                VideoScene scene = request.getScenes().get(i);
                 sceneIdx++;
                 if (scene.getText() == null || scene.getText().isBlank()) continue;
 
                 Path frame = renderSceneFrame(scene, width, height, tempDir, sceneIdx);
-                int duration = scene.getDurationSeconds() > 0
-                    ? scene.getDurationSeconds()
-                    : estimateDurationSeconds(scene.getText());
+                int duration = Math.max(1, durations[i]);
 
                 Path audio = null;
                 if (scene.getAudioUrl() != null && !scene.getAudioUrl().isBlank()) {
@@ -135,9 +164,6 @@ public class FFmpegVideoProvider implements VideoProvider {
                     } catch (Exception e) {
                         log.warn("Scene {} audio download failed, rendering silently: {}", sceneIdx, e.getMessage());
                     }
-                }
-                if (audio != null && Files.exists(audio)) {
-                    allAudios.add(audio);
                 }
 
                 Path segment = tempDir.resolve("seg_" + sceneIdx + ".mp4");
@@ -163,19 +189,6 @@ public class FFmpegVideoProvider implements VideoProvider {
             cmd.add("-i");
             cmd.add(concatFile.toAbsolutePath().toString());
 
-            Path mixedAudio = null;
-            if (!allAudios.isEmpty()) {
-                try {
-                    mixedAudio = mixAudios(ffmpegPath, allAudios, tempDir.resolve("mixed.mp3"));
-                    if (mixedAudio != null && Files.exists(mixedAudio)) {
-                        cmd.add("-i");
-                        cmd.add(mixedAudio.toAbsolutePath().toString());
-                    }
-                } catch (Exception e) {
-                    log.warn("Audio mix failed, producing silent video: {}", e.getMessage());
-                }
-            }
-
             cmd.add("-c:v");
             cmd.add("libx264");
             cmd.add("-preset");
@@ -185,20 +198,40 @@ public class FFmpegVideoProvider implements VideoProvider {
             cmd.add("-pix_fmt");
             cmd.add("yuv420p");
 
-            if (mixedAudio != null && Files.exists(mixedAudio)) {
-                cmd.add("-c:a");
-                cmd.add("aac");
-                cmd.add("-b:a");
-                cmd.add("128k");
-                cmd.add("-shortest");
-            }
-
             cmd.add(output.toAbsolutePath().toString());
             log.info("Scene concat command: {}", String.join(" ", cmd));
 
             if (!runFFmpeg(cmd)) {
                 return VideoResponse.error("FFmpeg scene assembly failed");
             }
+
+            if (masterAudio != null && Files.exists(masterAudio)) {
+                Path finalOutput = tempDir.resolve("final.mp4");
+                List<String> muxCmd = new ArrayList<>();
+                muxCmd.add(ffmpegPath);
+                muxCmd.add("-y");
+                muxCmd.add("-i");
+                muxCmd.add(output.toAbsolutePath().toString());
+                muxCmd.add("-i");
+                muxCmd.add(masterAudio.toAbsolutePath().toString());
+                muxCmd.add("-map");
+                muxCmd.add("0:v:0");
+                muxCmd.add("-map");
+                muxCmd.add("1:a:0");
+                muxCmd.add("-c:v");
+                muxCmd.add("copy");
+                muxCmd.add("-c:a");
+                muxCmd.add("aac");
+                muxCmd.add("-b:a");
+                muxCmd.add("128k");
+                muxCmd.add("-shortest");
+                muxCmd.add(finalOutput.toAbsolutePath().toString());
+                log.info("Audio mux command: {}", String.join(" ", muxCmd));
+                if (runFFmpeg(muxCmd) && Files.exists(finalOutput) && Files.size(finalOutput) > 0) {
+                    Files.move(finalOutput, output, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+
             if (!Files.exists(output) || Files.size(output) == 0) {
                 return VideoResponse.error("FFmpeg produced no output file");
             }
@@ -211,6 +244,59 @@ public class FFmpegVideoProvider implements VideoProvider {
             log.error("Scene-based video generation failed", e);
             return VideoResponse.error("Scene-based video generation failed: " + e.getMessage());
         }
+    }
+
+    private int[] distributeDuration(int masterDuration, List<VideoScene> scenes, int totalWords) {
+        int[] durations = new int[scenes.size()];
+        int allocated = 0;
+        int last = -1;
+        for (int i = 0; i < scenes.size(); i++) {
+            VideoScene scene = scenes.get(i);
+            if (scene.getText() == null || scene.getText().isBlank()) continue;
+            int words = wordCount(scene.getText());
+            int d = (int) Math.round((double) masterDuration * words / totalWords);
+            if (d < 1) d = 1;
+            durations[i] = d;
+            allocated += d;
+            last = i;
+        }
+        if (last >= 0 && allocated < masterDuration) {
+            durations[last] += (masterDuration - allocated);
+        } else if (last >= 0 && allocated > masterDuration) {
+            int diff = allocated - masterDuration;
+            durations[last] = Math.max(1, durations[last] - diff);
+        }
+        return durations;
+    }
+
+    private int wordCount(String text) {
+        if (text == null || text.isBlank()) return 0;
+        return text.trim().split("\\s+").length;
+    }
+
+    private int getAudioDurationSeconds(String ffmpegPath, Path audioFile) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                audioFile.toAbsolutePath().toString()
+            );
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String out = readStream(p.getInputStream());
+            boolean ok = p.waitFor(10, TimeUnit.SECONDS);
+            if (ok && p.exitValue() == 0) {
+                String line = out.trim();
+                if (!line.isBlank()) {
+                    double sec = Double.parseDouble(line);
+                    return (int) Math.round(sec);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Could not probe audio duration: {}", e.getMessage());
+        }
+        return 0;
     }
 
     private Path renderSceneFrame(VideoScene scene, int width, int height,

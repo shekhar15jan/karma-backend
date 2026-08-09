@@ -53,6 +53,8 @@ app:
     temp-location: ${TEMP_LOCATION:./data/temp}
   workspace:
     max-per-user: ${WORKSPACE_MAX_PER_USER:10}
+  media:
+    visual-only: ${MEDIA_IMAGE_VISUAL_ONLY:true}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}
     allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS

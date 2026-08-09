@@ -23,6 +23,9 @@ public class Skill extends BaseEntity {
     @Column(columnDefinition = "TEXT")
     private String description;
 
+    @Column(columnDefinition = "TEXT")
+    private String content;
+
     @Column(length = 50)
     private String category;
 

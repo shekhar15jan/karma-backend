@@ -99,12 +99,17 @@ public class OpenCodeProvider implements LLMProvider {
                 messages.addAll(request.getMessages());
             }
 
-            Map<String, Object> body = Map.of(
-                "model", model,
-                "messages", messages,
-                "temperature", request.getTemperature(),
-                "max_tokens", request.getMaxTokens()
-            );
+            Map<String, Object> body = new java.util.HashMap<>();
+            body.put("model", model);
+            body.put("messages", messages);
+            body.put("temperature", request.getTemperature());
+            body.put("max_tokens", request.getMaxTokens());
+            body.put("reasoning_effort", "none");
+            if (request.getAdditionalParams() != null) {
+                for (Map.Entry<String, Object> entry : request.getAdditionalParams().entrySet()) {
+                    body.put(entry.getKey(), entry.getValue());
+                }
+            }
 
             var requestSpec = webClient.post()
                 .uri(baseUrl)

@@ -2,6 +2,10 @@ package com.karmaos.media;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.MediaType;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
@@ -104,7 +108,7 @@ public class CloudflareWorkersAIImageProvider implements ImageProvider {
                 } catch (ImageGenerationException e) {
                     roundError = e;
                     log.warn("Cloudflare attempt {} failed on model {}: {}", attempt + 1, model, e.getMessage());
-                    if (isContentBlocked(e.getMessage()) || isAuthFailure(e.getMessage())) {
+                    if (isContentBlocked(e.getMessage()) || isAuthFailure(e.getMessage()) || isQuotaExhausted(e.getMessage())) {
                         break;
                     }
                     sleepQuietly(1200L * (attempt + 1));
@@ -122,7 +126,11 @@ public class CloudflareWorkersAIImageProvider implements ImageProvider {
                 return ImageResponse.ok(List.of(dataUrl), request.getPrompt(), model, latency);
             }
             last = roundError;
-            if (roundError != null && !isContentBlocked(roundError.getMessage())) {
+            if (roundError != null && isQuotaExhausted(roundError.getMessage())) {
+                break;
+            }
+            if (roundError != null && !isContentBlocked(roundError.getMessage())
+                    && !isServerError(roundError.getMessage())) {
                 break;
             }
             String next = alternateModel(model);
@@ -155,6 +163,19 @@ public class CloudflareWorkersAIImageProvider implements ImageProvider {
         return m.contains("nsfw") || m.contains("content") || m.contains("filter") || m.contains("safety") || m.contains("blocked");
     }
 
+    private static boolean isServerError(String message) {
+        if (message == null) return false;
+        String m = message.toLowerCase();
+        return m.contains("500") || m.contains("internal server") || m.contains("error code 3043") || m.contains("code 3043");
+    }
+
+    private static boolean isQuotaExhausted(String message) {
+        if (message == null) return false;
+        String m = message.toLowerCase();
+        return m.contains("429") || m.contains("4006") || m.contains("daily free allocation")
+            || m.contains("neurons") || m.contains("quota") || m.contains("billing");
+    }
+
     private static String alternateModel(String current) {
         for (String m : AVAILABLE_MODELS) {
             if (!m.equals(current)) {
@@ -166,17 +187,72 @@ public class CloudflareWorkersAIImageProvider implements ImageProvider {
 
     private byte[] generateImage(ImageRequest request, String model) {
         String url = "https://api.cloudflare.com/client/v4/accounts/" + accountId + "/ai/run/" + model;
-        Map<String, Object> body = new java.util.LinkedHashMap<>();
         String prompt = request.getPrompt() != null ? request.getPrompt() : "";
         if (prompt.length() > 2040) {
             prompt = prompt.substring(Math.max(0, prompt.length() - 2040));
         }
+        if (model.contains("flux-2")) {
+            return generateMultipart(url, model, prompt, request);
+        }
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
         body.put("prompt", prompt);
-        if (request.getSeed() != null) {
+        if (request.getSeed() != null && !"@cf/black-forest-labs/flux-1-schnell".equals(model)) {
             body.put("seed", request.getSeed());
         }
-        body.put("num_steps", 20);
-        body.put("guidance", 3.5);
+        if (!"@cf/black-forest-labs/flux-1-schnell".equals(model)) {
+            body.put("num_steps", 20);
+            body.put("guidance", 3.5);
+        }
+        return postJson(url, model, body);
+    }
+
+    /**
+     * FLUX.2 family models on Workers AI require multipart/form-data input, even
+     * when no reference images are used. Sends the prompt (and options) as form fields.
+     */
+    private byte[] generateMultipart(String url, String model, String prompt, ImageRequest request) {
+        MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
+        form.add("prompt", prompt);
+        if (request.getSeed() != null) {
+            form.add("seed", request.getSeed());
+        }
+        form.add("steps", 20);
+        form.add("guidance", 3.5);
+        try {
+            return webClient.post()
+                .uri(url)
+                .header("Authorization", "Bearer " + apiToken)
+                .contentType(MediaType.MULTIPART_FORM_DATA)
+                .body(BodyInserters.fromMultipartData(form))
+                .exchangeToMono(resp -> {
+                    int status = resp.statusCode().value();
+                    return resp.bodyToMono(byte[].class).map(bytes -> {
+                        byte[] rawBody = bytes != null ? bytes : new byte[0];
+                        if (rawBody.length == 0) {
+                            return new Result(status, rawBody, null);
+                        }
+                        if (looksLikeImage(rawBody)) {
+                            return new Result(status, rawBody, null);
+                        }
+                        byte[] embedded = extractEmbeddedImage(rawBody);
+                        if (embedded != null) {
+                            return new Result(status, embedded, null);
+                        }
+                        String errorText = extractErrorText(rawBody);
+                        return new Result(status, rawBody, errorText);
+                    });
+                })
+                .block(Duration.ofSeconds(120))
+                .validate(model);
+        } catch (org.springframework.web.reactive.function.client.WebClientResponseException e) {
+            String detail = extractCloudflareError(e);
+            throw new ImageGenerationException(
+                "Cloudflare returned " + e.getStatusCode().value() + " for model " + model
+                + (detail == null ? "" : ": " + detail));
+        }
+    }
+
+    private byte[] postJson(String url, String model, Map<String, Object> body) {
         try {
             return webClient.post()
                 .uri(url)

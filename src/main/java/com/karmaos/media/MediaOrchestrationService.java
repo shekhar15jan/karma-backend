@@ -1,6 +1,7 @@
 package com.karmaos.media;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.karmaos.agent.Agent;
 import com.karmaos.agent.AgentRepository;
 import com.karmaos.artifact.Artifact;
@@ -8,6 +9,8 @@ import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.artifact.ArtifactStorageService;
 import com.karmaos.execution.ExecutionStep;
 import com.karmaos.execution.ExecutionService;
+import com.karmaos.execution.ExecutionStepRepository;
+import com.karmaos.junction.AgentSkillRepository;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
 import com.karmaos.provider.Provider;
@@ -19,6 +22,7 @@ import com.karmaos.publishing.PublishingService;
 import com.karmaos.settings.RuntimeSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -33,9 +37,9 @@ public class MediaOrchestrationService {
 
     private static final Logger log = LoggerFactory.getLogger(MediaOrchestrationService.class);
 
-    private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "pollinations", "pollinations-image", "cloudflare");
+    private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "cloudflare");
     private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("google", "gemini", "edge-tts", "edge");
-    private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("ffmpeg");
+    private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("ffmpeg", "remotion");
     private static final Set<String> MUSIC_PROVIDER_TYPES = Set.of("google-music");
     private static final Map<String, String> CAPABILITY_PROVIDER_MAP = Map.of(
         "image_generation", "google",
@@ -57,6 +61,14 @@ public class MediaOrchestrationService {
     private final RuntimeSettings runtimeSettings;
     private final ObjectMapper objectMapper;
     private final MissionRepository missionRepository;
+    private final ExecutionStepRepository executionStepRepository;
+    private final AgentSkillRepository agentSkillRepository;
+
+    @Value("${RENDERER_URL:}")
+    private String visualRendererUrl;
+
+    @Value("${media.visual-only:true}")
+    private boolean visualOnly;
 
     public MediaOrchestrationService(ImageProviderFactory imageProviderFactory,
                                       VoiceProviderFactory voiceProviderFactory,
@@ -71,7 +83,9 @@ public class MediaOrchestrationService {
                                       ExecutionService executionService,
                                       RuntimeSettings runtimeSettings,
                                       ObjectMapper objectMapper,
-                                      MissionRepository missionRepository) {
+                                      MissionRepository missionRepository,
+                                      ExecutionStepRepository executionStepRepository,
+                                      AgentSkillRepository agentSkillRepository) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
         this.videoProviderFactory = videoProviderFactory;
@@ -86,6 +100,8 @@ public class MediaOrchestrationService {
         this.runtimeSettings = runtimeSettings;
         this.objectMapper = objectMapper;
         this.missionRepository = missionRepository;
+        this.executionStepRepository = executionStepRepository;
+        this.agentSkillRepository = agentSkillRepository;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
@@ -93,6 +109,19 @@ public class MediaOrchestrationService {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "IMAGE_GENERATION", contextData, missionId);
 
         try {
+            requireAgentSkill(agentId);
+            List<String> diagramSpecs = extractDiagramSpecs(contextData);
+            if (!diagramSpecs.isEmpty()) {
+                return runDiagramStep(executionId, flowId, agentId, stepOrder, contextData, missionId, step, diagramSpecs);
+            }
+
+            if (visualOnly) {
+                step.setStatus("FAILED");
+                step.setErrorMessage("Visual-only mode: script provides no per-scene visual_spec/diagram_spec; every scene image must be rendered via the HTML/CSS Visual Engine");
+                step.setCompletedAt(LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
+            }
+
             Provider primaryProvider = resolveMissionPreferredImageProvider(missionId);
             if (primaryProvider == null) {
                 primaryProvider = resolveGeminiImageProvider(agentId);
@@ -100,7 +129,7 @@ public class MediaOrchestrationService {
             if (primaryProvider == null) {
                 primaryProvider = resolveAgentPreferredProvider(agentId, IMAGE_PROVIDER_TYPES);
                 if (primaryProvider == null) {
-                    primaryProvider = resolveProviderForCapability(IMAGE_PROVIDER_TYPES, "pollinations");
+                    primaryProvider = resolveProviderForCapability(IMAGE_PROVIDER_TYPES, "cloudflare");
                 }
             }
             if (primaryProvider == null) {
@@ -110,9 +139,8 @@ public class MediaOrchestrationService {
                 step.setCompletedAt(LocalDateTime.now());
                 return executionService.saveStep(executionId, step);
             }
-            boolean keylessImage = isKeylessImage(primaryProvider);
             String apiKey = getApiKey(primaryProvider);
-            if (!keylessImage && apiKey.isEmpty()) {
+            if (apiKey.isEmpty()) {
                 log.error("Image step failed: provider {} has no API key configured", primaryProvider.getProviderType());
                 step.setStatus("FAILED");
                 step.setErrorMessage("No image generation provider with a valid API key is configured");
@@ -124,13 +152,7 @@ public class MediaOrchestrationService {
             if (primaryImageProvider instanceof GoogleImageProvider gip && !configuredModels.isEmpty()) {
                 gip.setConfiguredModels(configuredModels);
             }
-            ImageProvider fallbackProvider;
-            if (isKeylessImage(primaryProvider)) {
-                fallbackProvider = primaryImageProvider;
-            } else {
-                fallbackProvider = imageProviderFactory.getProvider("pollinations", null);
-            }
-            ImageProvider localFallbackProvider = imageProviderFactory.getFallbackProvider();
+            ImageProvider fallbackProvider = imageProviderFactory.getFallbackProvider();
 
             List<String> imagePrompts = buildScenePrompts(contextData);
             String characterSheet = buildCharacterSheet(contextData);
@@ -151,7 +173,8 @@ public class MediaOrchestrationService {
             List<String> allUrls = new ArrayList<>();
             List<String> failures = new ArrayList<>();
             for (int i = 0; i < imagePrompts.size(); i++) {
-                String sceneUrl = tryGenerateScene(primaryImageProvider, fallbackProvider, imagePrompts.get(i), i, missionSeed);
+                String safePrompt = ContentSafetyFilter.sanitizeImagePrompt(imagePrompts.get(i));
+                String sceneUrl = tryGenerateScene(primaryImageProvider, fallbackProvider, safePrompt, i, missionSeed);
                 if (sceneUrl != null) {
                     allUrls.add(sceneUrl);
                     persistImageArtifact(missionId, sceneUrl, i);
@@ -196,7 +219,7 @@ public class MediaOrchestrationService {
             if (response.isSuccess() && response.getImageUrls() != null && !response.getImageUrls().isEmpty()) {
                 return response.getImageUrls().get(0);
             }
-            log.warn("Fallback Pollinations also failed for scene {}: {}", sceneIndex, response.getErrorMessage());
+            log.warn("Fallback image provider also failed for scene {}: {}", sceneIndex, response.getErrorMessage());
         }
         return null;
     }
@@ -263,6 +286,120 @@ public class MediaOrchestrationService {
         artifactRepository.save(artifact);
     }
 
+    /**
+     * Extracts one raw scene spec JSON per scene from the upstream script output.
+     * Accepts the current {@code visual_spec} form, falling back to the legacy
+     * {@code diagram_spec} key. Returns empty list when the context carries no
+     * scene specs (pure diagram missions must have one per scene, otherwise the
+     * image step fails).
+     */
+    private List<String> extractDiagramSpecs(String contextData) {
+        if (contextData == null || contextData.isBlank()) {
+            return List.of();
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = extractJsonNode(contextData);
+            if (root == null) {
+                return List.of();
+            }
+            com.fasterxml.jackson.databind.JsonNode sections = null;
+            if (root.has("script_body") && root.get("script_body").isArray()) {
+                sections = root.get("script_body");
+            } else if (root.has("scenes") && root.get("scenes").isArray()) {
+                sections = root.get("scenes");
+            }
+            if (sections == null || sections.size() == 0) {
+                return List.of();
+            }
+            List<String> specs = new java.util.ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode section : sections) {
+                if (section.hasNonNull("visual_spec") && section.get("visual_spec").isObject()) {
+                    specs.add(section.get("visual_spec").toString());
+                } else if (section.hasNonNull("diagram_spec") && section.get("diagram_spec").isObject()) {
+                    specs.add(section.get("diagram_spec").toString());
+                }
+            }
+            return specs;
+        } catch (Exception e) {
+            log.warn("Failed to extract diagram specs: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Scene image rendering through the karma-renderer visual engine. The renderer is a
+     * mandatory dependency of diagram missions: if it is not configured, unreachable, or
+     * fails to render ANY scene, the step is FAILED so the execution/mission fails instead
+     * of silently degrading to the local Java2D provider.
+     */
+    private ExecutionStep runDiagramStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
+                                         String contextData, UUID missionId, ExecutionStep step,
+                                         List<String> diagramSpecs) {
+        try {
+            if (visualRendererUrl == null || visualRendererUrl.isBlank()) {
+                step.setStatus("FAILED");
+                step.setErrorMessage("Visual renderer is not configured (RENDERER_URL is blank); cannot render diagram scenes");
+                step.setCompletedAt(java.time.LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
+            }
+            VisualRenderImageProvider visualRenderer = new VisualRenderImageProvider(visualRendererUrl, null, objectMapper);
+            List<String> urls = new java.util.ArrayList<>();
+            List<Map.Entry<Integer, String>> failures = new java.util.ArrayList<>();
+            for (int i = 0; i < diagramSpecs.size(); i++) {
+                String specJson = diagramSpecs.get(i);
+                try {
+                    ObjectNode spec = (ObjectNode) objectMapper.readTree(specJson);
+                    BrandingSupport.applyBranding(spec, objectMapper);
+                    specJson = objectMapper.writeValueAsString(spec);
+                } catch (Exception ignored) {
+                    // non-JSON or malformed spec: pass through unchanged
+                }
+                ImageRequest req = new ImageRequest();
+                req.setPrompt(specJson);
+                req.setN(1);
+                try {
+                    ImageResponse resp = visualRenderer.generate(req);
+                    if (resp.isSuccess() && resp.getImageUrls() != null && !resp.getImageUrls().isEmpty()) {
+                        String url = resp.getImageUrls().get(0);
+                        urls.add(url);
+                        persistImageArtifact(missionId, url, i);
+                    } else {
+                        failures.add(Map.entry(i, "renderer returned error: " + resp.getErrorMessage()));
+                    }
+                } catch (Exception e) {
+                    log.warn("Visual renderer failed for scene {}: {}", i, e.getMessage());
+                    failures.add(Map.entry(i, e.getMessage()));
+                }
+            }
+            if (!failures.isEmpty()) {
+                String detail = failures.stream()
+                        .map(f -> "scene " + f.getKey() + " -> " + f.getValue())
+                        .collect(java.util.stream.Collectors.joining("; "));
+                step.setStatus("FAILED");
+                step.setErrorMessage("Visual renderer failed for " + failures.size() + "/" + diagramSpecs.size()
+                        + " scene(s): " + detail);
+                step.setCompletedAt(java.time.LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
+            }
+            if (urls.isEmpty()) {
+                step.setStatus("FAILED");
+                step.setErrorMessage("Scene rendering produced no images");
+                step.setCompletedAt(java.time.LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
+            }
+            step.setStatus("COMPLETED");
+            step.setOutputData(String.join("\n", urls));
+            step.setCompletedAt(java.time.LocalDateTime.now());
+            return executionService.saveStep(executionId, step);
+        } catch (Exception e) {
+            log.error("Diagram step failed: agentId={}", agentId, e);
+            step.setStatus("FAILED");
+            step.setErrorMessage(e.getMessage());
+            step.setCompletedAt(java.time.LocalDateTime.now());
+            return executionService.saveStep(executionId, step);
+        }
+    }
+
     private List<String> buildScenePrompts(String contextData) {
         if (contextData == null || contextData.isBlank()) {
             return List.of("Generate an image based on the mission context");
@@ -296,9 +433,37 @@ public class MediaOrchestrationService {
                 }
             }
         } catch (Exception ignored) {
-            // not JSON â€” treat as single prompt below
+            // not JSON — treat as single prompt below
+        }
+        List<String> markdownScenes = splitMarkdownScenes(contextData);
+        if (!markdownScenes.isEmpty()) {
+            return markdownScenes;
         }
         return List.of(contextData);
+    }
+
+    private List<String> splitMarkdownScenes(String text) {
+        if (text == null || text.isBlank()) return List.of();
+        List<String> scenes = new java.util.ArrayList<>();
+        String[] lines = text.split("\\R");
+        StringBuilder current = new StringBuilder();
+        java.util.regex.Pattern heading = java.util.regex.Pattern.compile(
+                "(?i)^\\s*(#{1,6}\\s*)?(scene\\s*\\d+|scene\\s*[:#.-]+|\\d+\\.\\s*scene)\\b.*$");
+        int matched = 0;
+        for (String line : lines) {
+            if (heading.matcher(line).matches()) {
+                if (current.length() > 0) {
+                    scenes.add(current.toString().trim());
+                }
+                current = new StringBuilder();
+                matched++;
+            }
+            current.append(line).append("\n");
+        }
+        if (current.length() > 0) {
+            scenes.add(current.toString().trim());
+        }
+        return matched >= 2 ? scenes : List.of();
     }
 
     private long deterministicSeed(UUID id) {
@@ -311,35 +476,16 @@ public class MediaOrchestrationService {
         try {
             com.fasterxml.jackson.databind.JsonNode root = extractJsonNode(contextData);
             if (root == null) return null;
+            if (!root.has("characters") || !root.get("characters").isArray()) return null;
             java.util.Map<String, String> characters = new java.util.LinkedHashMap<>();
-            if (root.has("characters") && root.get("characters").isArray()) {
-                for (com.fasterxml.jackson.databind.JsonNode c : root.get("characters")) {
-                    String name = c.hasNonNull("name") ? c.get("name").asText() : null;
-                    String desc = null;
-                    for (String dk : List.of("visual_style_notes", "visual_style", "appearance", "description")) {
-                        if (c.hasNonNull(dk)) { desc = c.get(dk).asText(); break; }
-                    }
-                    if (name != null && !name.isBlank()) {
-                        characters.put(name, desc != null && !desc.isBlank() ? desc : null);
-                    }
+            for (com.fasterxml.jackson.databind.JsonNode c : root.get("characters")) {
+                String name = c.hasNonNull("name") ? c.get("name").asText() : null;
+                String desc = null;
+                for (String dk : List.of("visual_style_notes", "visual_style", "appearance", "description")) {
+                    if (c.hasNonNull(dk)) { desc = c.get(dk).asText(); break; }
                 }
-            } else {
-                List<String> masterKeys = new ArrayList<>();
-                if (root.has("script_body") && root.get("script_body").isArray()) {
-                    for (com.fasterxml.jackson.databind.JsonNode s : root.get("script_body")) {
-                        for (String k : List.of("image_prompt", "visual_description")) {
-                            if (s.hasNonNull(k) && !s.get(k).asText().isBlank()) {
-                                masterKeys.add(s.get(k).asText());
-                            }
-                        }
-                    }
-                }
-                String joined = String.join(" \n ", masterKeys);
-                java.util.regex.Matcher m = java.util.regex.Pattern
-                        .compile("(?i)\\b([A-Z][a-z]+) (the|the) ([A-Z][a-z]+)\\b")
-                        .matcher(joined);
-                while (m.find()) {
-                    characters.putIfAbsent(m.group(1) + " the " + m.group(3), null);
+                if (name != null && !name.isBlank()) {
+                    characters.put(name, desc != null && !desc.isBlank() ? desc : null);
                 }
             }
 
@@ -364,6 +510,7 @@ public class MediaOrchestrationService {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "TTS", contextData, missionId);
 
         try {
+            requireAgentSkill(agentId);
             Provider provider = resolveAgentPreferredProvider(agentId, VOICE_PROVIDER_TYPES);
             if (provider == null) {
                 provider = resolveProviderForCapability(VOICE_PROVIDER_TYPES, "edge-tts");
@@ -375,27 +522,56 @@ public class MediaOrchestrationService {
                 ? voiceProviderFactory.getProvider(provider.getProviderType(), apiKey)
                 : voiceProviderFactory.getFallbackProvider();
 
-            VoiceRequest request = new VoiceRequest();
-            String text = contextData != null ? contextData : "Sample narration text";
-            if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
-                text += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
+            String text = extractNarrationText(contextData);
+            if (text == null || text.isBlank()) {
+                text = contextData != null ? contextData : "Sample narration text";
             }
+            List<String> speakerTexts = extractSpeakerTexts(contextData);
+            if (speakerTexts.isEmpty()) {
+                speakerTexts = List.of(text);
+            }
+            if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
+                for (int i = 0; i < speakerTexts.size(); i++) {
+                    speakerTexts.set(i, speakerTexts.get(i) + "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback);
+                }
+            }
+
+            long start = System.currentTimeMillis();
+            int synthesized = 0;
+            List<String> sceneAudioUrls = new ArrayList<>();
+            // One MP3 per scene, persisted with sceneIndex metadata for frame-accurate sync.
+            for (int i = 0; i < speakerTexts.size(); i++) {
+                VoiceRequest sceneRequest = new VoiceRequest();
+                sceneRequest.setText(speakerTexts.get(i));
+                sceneRequest.setModel(voiceProvider.getDefaultModel());
+                if (voiceProvider instanceof EdgeTtsProvider) {
+                    sceneRequest.setVoice(voiceProvider.getDefaultModel());
+                }
+                VoiceResponse sceneResponse = voiceProvider.synthesize(sceneRequest);
+                if (sceneResponse.isSuccess()) {
+                    sceneAudioUrls.add(sceneResponse.getAudioUrl());
+                    persistSceneAudioArtifact(missionId, "Scene Narration " + (i + 1), sceneResponse.getAudioUrl(),
+                            sceneResponse.getDurationSeconds(), i);
+                    synthesized++;
+                } else {
+                    log.warn("Per-scene narration {} failed: {}", i, sceneResponse.getErrorMessage());
+                    sceneAudioUrls.add(null);
+                }
+            }
+
+            // Combined narration artifact retained for ffmpeg-provider back-compat.
+            VoiceRequest request = new VoiceRequest();
             request.setText(text);
             request.setModel(voiceProvider.getDefaultModel());
             if (voiceProvider instanceof EdgeTtsProvider) {
                 request.setVoice(voiceProvider.getDefaultModel());
             }
-
-            long start = System.currentTimeMillis();
-            VoiceResponse response = voiceProvider.synthesize(request);
-            if (!response.isSuccess() && !(voiceProvider instanceof EdgeTtsProvider)) {
-                log.warn("Voice provider {} failed ({}); falling back to Edge TTS",
-                        voiceProvider.getName(), response.getErrorMessage());
-                voiceProvider = new EdgeTtsProvider();
-                request.setModel(voiceProvider.getDefaultModel());
-                request.setVoice(voiceProvider.getDefaultModel());
-                response = voiceProvider.synthesize(request);
+            Double targetSpeed = computeTargetSpeed(missionId, text);
+            if (targetSpeed != null) {
+                request.setSpeed(targetSpeed);
+                log.info("Narration speed adjusted to {}x to fill target duration for mission {}", targetSpeed, missionId);
             }
+            VoiceResponse response = voiceProvider.synthesize(request);
             step.setLatencyMs((int) (System.currentTimeMillis() - start));
 
             if (response.isSuccess()) {
@@ -415,6 +591,10 @@ public class MediaOrchestrationService {
                 artifact.setSize(response.getDurationSeconds());
                 artifactStorageService.persist(artifact, missionId);
                 artifactRepository.save(artifact);
+
+                if (synthesized > 0) {
+                    log.info("Voice step synthesized {} per-scene narration(s) for mission {}", synthesized, missionId);
+                }
             } else {
                 step.setStatus("FAILED");
                 step.setErrorMessage(response.getErrorMessage());
@@ -429,11 +609,29 @@ public class MediaOrchestrationService {
         return executionService.saveStep(executionId, step);
     }
 
+    private void persistSceneAudioArtifact(UUID missionId, String name, String audioUrl, long sizeSeconds, int sceneIndex) {
+        Artifact artifact = new Artifact();
+        artifact.setMissionId(missionId);
+        artifact.setName(name);
+        artifact.setArtifactType("AUDIO");
+        artifact.setStatus("COMPLETED");
+        artifact.setContentText(audioUrl);
+        artifact.setContentType("audio/mpeg");
+        artifact.setReviewStatus("PENDING");
+        artifact.setPublicationStatus("UNPUBLISHED");
+        artifact.setStorageLocation(audioUrl);
+        artifact.setSize(sizeSeconds);
+        artifact.setMetadata("{\"sceneIndex\":" + sceneIndex + "}");
+        artifactStorageService.persist(artifact, missionId);
+        artifactRepository.save(artifact);
+    }
+
     public ExecutionStep executeMusicStep(UUID executionId, UUID flowId, UUID agentId,
                                           int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "MUSIC_GENERATION", contextData, missionId);
 
         try {
+            requireAgentSkill(agentId);
             Provider provider = resolveAgentPreferredProvider(agentId, MUSIC_PROVIDER_TYPES);
             if (provider == null) {
                 provider = resolveProviderForCapability(MUSIC_PROVIDER_TYPES, "google-music");
@@ -493,52 +691,83 @@ public class MediaOrchestrationService {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "VIDEO_GENERATION", contextData, missionId);
 
         try {
+            requireAgentSkill(agentId);
             Provider provider = resolveProviderForCapability(VIDEO_PROVIDER_TYPES, "ffmpeg");
+            String providerType = provider != null && provider.getProviderType() != null
+                    ? provider.getProviderType().toLowerCase() : "ffmpeg";
             VideoProvider videoProvider = provider != null
                 ? videoProviderFactory.getProvider(provider.getProviderType(), getApiKey(provider))
                 : videoProviderFactory.getFallbackProvider();
 
             VideoRequest request = new VideoRequest();
-            request.setTitle("Video for Mission " + missionId.toString().substring(0, 8));
-            String script = contextData != null ? contextData : "";
+            String missionLabel = resolveMissionName(missionId);
+            request.setTitle(missionLabel);
+            String script = resolveScriptForVideo(executionId, contextData);
             if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
                 script += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
             }
             request.setScript(script);
 
-            // Collect existing audio and image artifacts (images ordered by sceneIndex)
+            // Collect upstream artifacts: per-scene audio (by sceneIndex), combined
+            // narration, background music and any scene images (ffmpeg back-compat).
             List<Artifact> artifacts = artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId);
-            List<String> imageUrls = new java.util.ArrayList<>();
-            String audioUrl = null;
+            java.util.Map<Integer, String> sceneAudio = new java.util.TreeMap<>();
             java.util.Map<Integer, String> sceneImages = new java.util.TreeMap<>();
-
+            String audioUrl = null;
+            String musicUrl = null;
             for (Artifact a : artifacts) {
-                if ("AUDIO".equals(a.getArtifactType()) && audioUrl == null) {
-                    audioUrl = a.getStorageLocation();
-                } else if ("MEDIA_ASSET".equals(a.getArtifactType()) && isImageContentType(a.getContentType())) {
-                    if (a.getStorageLocation() != null) {
-                        Integer sceneIndex = extractSceneIndex(a.getMetadata());
-                        if (sceneIndex != null) {
-                            sceneImages.putIfAbsent(sceneIndex, a.getStorageLocation());
-                        } else {
-                            sceneImages.putIfAbsent(sceneImages.size(), a.getStorageLocation());
-                        }
+                if (!"AUDIO".equals(a.getArtifactType()) && !"MEDIA_ASSET".equals(a.getArtifactType())) continue;
+                String location = a.getStorageLocation();
+                if (location == null) continue;
+                if ("AUDIO".equals(a.getArtifactType())) {
+                    if (isMusicArtifact(a)) {
+                        if (musicUrl == null) musicUrl = location;
+                        continue;
+                    }
+                    Integer sceneIndex = extractSceneIndex(a.getMetadata());
+                    if (sceneIndex != null) {
+                        sceneAudio.putIfAbsent(sceneIndex, location);
+                    } else if (audioUrl == null) {
+                        audioUrl = location;
+                    }
+                } else if (isImageContentType(a.getContentType())) {
+                    Integer sceneIndex = extractSceneIndex(a.getMetadata());
+                    if (sceneIndex != null) {
+                        sceneImages.putIfAbsent(sceneIndex, location);
+                    } else {
+                        sceneImages.putIfAbsent(sceneImages.size(), location);
                     }
                 }
             }
-            imageUrls.addAll(sceneImages.values());
-            if (imageUrls.isEmpty()) {
-                log.error("Video composition failed: no images produced upstream for the video (no fallback imagery will be used)");
-                step.setStatus("FAILED");
-                step.setErrorMessage("Video composition has no usable images upstream; image step must run first");
-                step.setCompletedAt(LocalDateTime.now());
-                return executionService.saveStep(executionId, step);
-            }
-            request.setAudioUrl(audioUrl);
-            request.setImageUrls(imageUrls);
 
-            List<VideoScene> scenes = buildScenesFromScript(script, imageUrls);
-            request.setScenes(scenes);
+            boolean useRemotion = "remotion".equals(providerType) || videoProvider instanceof RemotionVideoProvider;
+
+            if (useRemotion) {
+                List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages);
+                if (scenes.isEmpty()) {
+                    step.setStatus("FAILED");
+                    step.setErrorMessage("Remotion video step found no scenes with a visual spec in the script");
+                    step.setCompletedAt(LocalDateTime.now());
+                    return executionService.saveStep(executionId, step);
+                }
+                request.setScenes(scenes);
+                request.setAudioUrl(audioUrl);
+                request.setMusicUrl(musicUrl);
+                request.setIntroTitle(missionLabel);
+                request.setIntroSubtitle(resolveMissionSubtitle(missionId));
+            } else {
+                List<String> imageUrls = new java.util.ArrayList<>(sceneImages.values());
+                if (imageUrls.isEmpty()) {
+                    log.error("Video composition failed: no images produced upstream for the video (no fallback imagery will be used)");
+                    step.setStatus("FAILED");
+                    step.setErrorMessage("Video composition has no usable images upstream; image step must run first");
+                    step.setCompletedAt(LocalDateTime.now());
+                    return executionService.saveStep(executionId, step);
+                }
+                request.setAudioUrl(audioUrl);
+                request.setImageUrls(imageUrls);
+                request.setScenes(buildScenesFromScript(script, imageUrls));
+            }
 
             long start = System.currentTimeMillis();
             VideoResponse response = videoProvider.generate(request);
@@ -575,6 +804,158 @@ public class MediaOrchestrationService {
         return executionService.saveStep(executionId, step);
     }
 
+    private String resolveMissionName(UUID missionId) {
+        if (missionId == null) return "Karma OS";
+        try {
+            Mission mission = missionRepository.findById(missionId).orElse(null);
+            if (mission != null && mission.getName() != null && !mission.getName().isBlank()) {
+                return mission.getName();
+            }
+        } catch (Exception ignored) {}
+        return "Karma OS";
+    }
+
+    private String resolveMissionSubtitle(UUID missionId) {
+        if (missionId == null) return null;
+        try {
+            Mission mission = missionRepository.findById(missionId).orElse(null);
+            if (mission != null && mission.getDescription() != null && !mission.getDescription().isBlank()) {
+                String d = mission.getDescription().trim();
+                return d.length() > 120 ? d.substring(0, 120) : d;
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private boolean isMusicArtifact(Artifact a) {
+        if (a.getName() == null) return false;
+        String n = a.getName().toLowerCase();
+        return n.contains("music") || n.contains("soundtrack") || n.contains("background");
+    }
+
+    /**
+     * Builds Remotion scenes from the script: each script_body section supplies its
+     * visual_spec (or legacy diagram_spec) and the per-scene narration audio matched by
+     * sceneIndex. A scene without per-scene audio falls back to the combined narration.
+     */
+    private List<VideoScene> buildRemotionScenes(String script,
+                                                 java.util.Map<Integer, String> sceneAudio,
+                                                 String combinedAudio,
+                                                 java.util.Map<Integer, String> sceneImages) {
+        List<VideoScene> scenes = new java.util.ArrayList<>();
+        if (script == null || script.isBlank()) return scenes;
+
+        List<String> specJsons = new java.util.ArrayList<>();
+        List<String> speakerTexts = new java.util.ArrayList<>();
+        try {
+            String jsonCandidate = extractJson(script);
+            if (jsonCandidate != null) {
+                com.fasterxml.jackson.databind.JsonNode root =
+                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(jsonCandidate);
+                com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
+                if (body != null && body.isArray()) {
+                    for (com.fasterxml.jackson.databind.JsonNode section : body) {
+                        if (section.hasNonNull("visual_spec") && section.get("visual_spec").isObject()) {
+                            specJsons.add(section.get("visual_spec").toString());
+                        } else if (section.hasNonNull("diagram_spec") && section.get("diagram_spec").isObject()) {
+                            specJsons.add(section.get("diagram_spec").toString());
+                        } else {
+                            specJsons.add(null);
+                        }
+                        if (section.hasNonNull("speaker_text")) {
+                            speakerTexts.add(section.get("speaker_text").asText());
+                        } else {
+                            speakerTexts.add(section.toString());
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // not JSON — treated as a single scene below
+        }
+
+        if (speakerTexts.isEmpty()) {
+            speakerTexts.add(script);
+            specJsons.add(null);
+        }
+
+        for (int i = 0; i < speakerTexts.size(); i++) {
+            VideoScene scene = new VideoScene();
+            scene.setText(speakerTexts.get(i));
+            String spec = i < specJsons.size() ? specJsons.get(i) : null;
+            if (spec != null && !spec.isBlank()) {
+                scene.setSpec(spec);
+            } else if (sceneImages.containsKey(i)) {
+                scene.setImageUrl(sceneImages.get(i));
+            }
+            String perScene = sceneAudio.get(i);
+            scene.setAudioUrl(perScene != null ? perScene : combinedAudio);
+            scenes.add(scene);
+        }
+        return scenes;
+    }
+
+    private String extractNarrationText(String script) {
+        if (script == null || script.isBlank()) return null;
+        List<String> speakerTexts = new java.util.ArrayList<>();
+        try {
+            String jsonCandidate = extractJson(script);
+            if (jsonCandidate != null) {
+                com.fasterxml.jackson.databind.JsonNode root =
+                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(jsonCandidate);
+                com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
+                if (body != null && body.isArray()) {
+                    for (com.fasterxml.jackson.databind.JsonNode section : body) {
+                        if (section.hasNonNull("speaker_text")) {
+                            speakerTexts.add(section.get("speaker_text").asText());
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // fall back to raw text below
+        }
+        if (speakerTexts.isEmpty()) {
+            return null;
+        }
+        return String.join("\n\n", speakerTexts);
+    }
+
+    /**
+     * Returns one narration string per script scene (script_body[].speaker_text),
+     * preserving order. Falls back to the raw text as a single scene.
+     */
+    private List<String> extractSpeakerTexts(String script) {
+        List<String> result = new ArrayList<>();
+        if (script == null || script.isBlank()) {
+            return result;
+        }
+        try {
+            String jsonCandidate = extractJson(script);
+            if (jsonCandidate != null) {
+                com.fasterxml.jackson.databind.JsonNode root =
+                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(jsonCandidate);
+                com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
+                if (body != null && body.isArray()) {
+                    for (com.fasterxml.jackson.databind.JsonNode section : body) {
+                        if (section.hasNonNull("speaker_text")) {
+                            String st = section.get("speaker_text").asText();
+                            if (st != null && !st.isBlank()) {
+                                result.add(st);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through to raw text below
+        }
+        if (result.isEmpty()) {
+            result.add(script);
+        }
+        return result;
+    }
+
     private List<VideoScene> buildScenesFromScript(String script, List<String> imageUrls) {
         List<VideoScene> scenes = new java.util.ArrayList<>();
         if (script == null || script.isBlank()) return scenes;
@@ -608,17 +989,46 @@ public class MediaOrchestrationService {
             if (i < imageUrls.size()) {
                 scene.setImageUrl(imageUrls.get(i));
             }
-            String narrationUrl = synthesizeNarration(speakerTexts.get(i));
-            if (narrationUrl != null) {
-                scene.setAudioUrl(narrationUrl);
-            }
             scenes.add(scene);
         }
         return scenes;
     }
 
+    private String resolveScriptForVideo(UUID executionId, String contextData) {
+        try {
+            List<ExecutionStep> steps = executionStepRepository.findByExecutionIdOrderByStepOrder(executionId);
+            ExecutionStep best = null;
+            for (ExecutionStep s : steps) {
+                String out = s.getOutputData();
+                if (out == null || out.isBlank()) continue;
+                String stepType = s.getStepType() != null ? s.getStepType() : "";
+                if ("IMAGE_GENERATION".equals(stepType) || "TTS".equals(stepType)
+                        || "MUSIC_GENERATION".equals(stepType) || "VIDEO_GENERATION".equals(stepType)
+                        || "PUBLISH".equals(stepType)) {
+                    continue;
+                }
+                if (out.contains("\"script_body\"") || out.contains("speaker_text")) {
+                    best = s;
+                }
+            }
+            if (best != null && best.getOutputData() != null) {
+                return best.getOutputData();
+            }
+        } catch (Exception e) {
+            log.warn("Could not resolve script from execution steps for {}: {}", executionId, e.getMessage());
+        }
+        if (contextData != null && (contextData.contains("\"script_body\"") || contextData.contains("speaker_text"))) {
+            return contextData;
+        }
+        return contextData != null ? contextData : "";
+    }
+
     private String extractJson(String input) {
         if (input == null) return null;
+        String strict = com.karmaos.common.StrictJson.extractLastObjectJson(input);
+        if (strict != null) {
+            return strict;
+        }
         int fence = input.indexOf("```");
         if (fence >= 0) {
             int start = input.indexOf('{', fence);
@@ -661,6 +1071,28 @@ public class MediaOrchestrationService {
         }
     }
 
+    private Double computeTargetSpeed(UUID missionId, String text) {
+        if (missionId == null || text == null || text.isBlank()) return null;
+        try {
+            Mission mission = missionRepository.findById(missionId).orElse(null);
+            if (mission == null || mission.getTargetDurationSeconds() == null) return null;
+            int target = mission.getTargetDurationSeconds();
+            int words = text.trim().split("\\s+").length;
+            if (words == 0) return null;
+            double naturalSeconds = words / 150.0 * 60;
+            if (naturalSeconds <= 0) return null;
+            double speed = naturalSeconds / target;
+            // Never slow the narration below natural pace; only speed up when the
+            // script would overshoot the target duration.
+            if (speed <= 1.15) return null;
+            if (speed > 1.8) speed = 1.8;
+            return Math.round(speed * 100.0) / 100.0;
+        } catch (Exception e) {
+            log.warn("Failed to compute narration speed: {}", e.getMessage());
+            return null;
+        }
+    }
+
     private String synthesizeNarration(String text) {
         if (text == null || text.isBlank()) return null;
         try {
@@ -688,6 +1120,7 @@ public class MediaOrchestrationService {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "PUBLISH", contextData, missionId);
 
         try {
+            requireAgentSkill(agentId);
             List<Artifact> artifacts = artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId);
             Artifact target = artifacts.stream()
                     .filter(a -> "VIDEO".equals(a.getArtifactType()) || "MEDIA_ASSET".equals(a.getArtifactType()))
@@ -812,6 +1245,24 @@ public class MediaOrchestrationService {
                 .filter(p -> p.getDeletedAt() == null)
                 .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
                 .toList();
+        if (preferredTypes.contains("cloudflare")) {
+            Provider cloudflare = candidates.stream()
+                    .filter(p -> p.getProviderType() != null && "cloudflare".equalsIgnoreCase(p.getProviderType()))
+                    .findFirst().orElse(null);
+            if (cloudflare != null) {
+                return cloudflare;
+            }
+        }
+        if (preferredTypes.contains("google") || preferredTypes.contains("gemini")) {
+            Provider google = candidates.stream()
+                    .filter(p -> p.getProviderType() != null && ("google".equalsIgnoreCase(p.getProviderType())
+                            || "gemini".equalsIgnoreCase(p.getProviderType())))
+                    .filter(p -> !getApiKey(p).isEmpty())
+                    .findFirst().orElse(null);
+            if (google != null) {
+                return google;
+            }
+        }
         for (Provider p : candidates) {
             if (p.getProviderType() != null && preferredTypes.contains(p.getProviderType().toLowerCase())) {
                 return p;
@@ -830,12 +1281,6 @@ public class MediaOrchestrationService {
         return providerKeyCipher.decrypt(provider.getEncryptedApiKey());
     }
 
-    private boolean isKeylessImage(Provider provider) {
-        if (provider == null || provider.getProviderType() == null) return false;
-        String t = provider.getProviderType().toLowerCase();
-        return "pollinations".equals(t) || "pollinations-image".equals(t);
-    }
-
     private ExecutionStep createStep(UUID executionId, UUID flowId, UUID agentId,
                                      int stepOrder, String stepType, String contextData, UUID missionId) {
         ExecutionStep step = new ExecutionStep();
@@ -848,5 +1293,15 @@ public class MediaOrchestrationService {
         step.setStartedAt(LocalDateTime.now());
         step.setInputData(contextData);
         return step;
+    }
+
+    private void requireAgentSkill(UUID agentId) {
+        if (agentId == null) {
+            throw new IllegalStateException("Agent is not configured for this media step");
+        }
+        if (agentSkillRepository.findByIdAgentId(agentId).isEmpty()) {
+            throw new IllegalStateException("Agent has no skills assigned. "
+                + "Skills are a mandatory behavioral contract; assign a skill before executing this step.");
+        }
     }
 }

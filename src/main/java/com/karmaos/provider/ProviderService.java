@@ -33,18 +33,18 @@ public class ProviderService {
 
 private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode",
-            "edge-tts", "edge", "ffmpeg", "google-music", "pollinations", "pollinations-image", "cloudflare");
+            "edge-tts", "edge", "ffmpeg", "google-music", "cloudflare");
 
     private static final Set<String> LLM_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode");
 
     private static final Set<String> VOICE_TYPES = Set.of("edge-tts", "edge");
 
-    private static final Set<String> IMAGE_TYPES = Set.of("google", "gemini", "pollinations", "pollinations-image", "cloudflare");
+    private static final Set<String> IMAGE_TYPES = Set.of("google", "gemini", "cloudflare");
 
     private static final Set<String> MUSIC_TYPES = Set.of("google-music");
 
-    private static final Set<String> KEYLESS_TYPES = Set.of("edge-tts", "edge", "ffmpeg", "pollinations", "pollinations-image");
+    private static final Set<String> KEYLESS_TYPES = Set.of("edge-tts", "edge", "ffmpeg");
 
     private final ProviderRepository providerRepository;
     private final ObjectMapper objectMapper;
@@ -54,6 +54,9 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
     private final VoiceProviderFactory voiceProviderFactory;
     private final VideoProviderFactory videoProviderFactory;
     private final MusicProviderFactory musicProviderFactory;
+
+    @org.springframework.beans.factory.annotation.Value("${media.visual-only:true}")
+    private boolean visualOnly;
 
     public ProviderService(ProviderRepository providerRepository,
                            ObjectMapper objectMapper,
@@ -181,6 +184,9 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             boolean ok;
             String detail = "";
             if (hasImagenModel(provider) && !apiKey.isBlank()) {
+                if (visualOnly) {
+                    return Map.of("success", false, "message", "disabled: visual-only mode", "modelCount", 0);
+                }
                 ok = imageProviderFactory.getProvider(type, apiKey).testConnection();
             } else if (MUSIC_TYPES.contains(type)) {
                 if (apiKey.isBlank()) {
@@ -208,7 +214,10 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
                 }
                 ok = voiceProviderFactory.getProvider(type, apiKey).testConnection();
             } else if (IMAGE_TYPES.contains(type)) {
-                if (apiKey.isBlank() && !"pollinations".equals(type) && !"pollinations-image".equals(type)) {
+                if (visualOnly) {
+                    return Map.of("success", false, "message", "disabled: visual-only mode", "modelCount", 0);
+                }
+                if (apiKey.isBlank()) {
                     return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
                 }
                 ok = imageProviderFactory.getProvider(type, apiKey, apiEndpoint).testConnection();
@@ -255,6 +264,9 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             return null;
         }
         if (hasImagenModel(provider)) {
+            if (visualOnly) {
+                return null;
+            }
             return imageProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
         }
         if (MUSIC_TYPES.contains(type)) {
@@ -267,6 +279,9 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             return voiceProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
         }
         if (IMAGE_TYPES.contains(type)) {
+            if (visualOnly) {
+                return null;
+            }
             return imageProviderFactory.getProvider(type, apiKey, apiEndpoint).fetchAvailableModels();
         }
         return null;

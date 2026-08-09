@@ -18,7 +18,7 @@ import java.util.Map;
  * (e.g. gemini-2.5-flash, gemini-3.5-flash) rather than hardcoding dedicated
  * image-only model names. Falls back to a small built-in image-model list only
  * when no configured models are supplied. On any failure the orchestrator is
- * expected to retry with the Pollinations fallback (keyless, free).</p>
+ * expected to retry with the local fallback image provider.</p>
  */
 public class GoogleImageProvider implements ImageProvider {
 

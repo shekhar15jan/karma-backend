@@ -8,6 +8,7 @@ import com.karmaos.common.ErrorCode;
 import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionOrchestrator;
 import com.karmaos.execution.ExecutionRepository;
+import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowId;
@@ -135,6 +136,15 @@ ExecutionRepository executionRepository,
         List<UUID> selectedFlowIds = request.getSelectedFlowIds();
 
         if (selectedFlowIds == null || selectedFlowIds.isEmpty()) {
+            List<Flow> defaultFlows = flowRepository.findByCategoryAndStatus(mission.getMissionType(), "ACTIVE");
+            if (!defaultFlows.isEmpty()) {
+                Flow defaultFlow = defaultFlows.get(0);
+                MissionFlow mf = new MissionFlow();
+                mf.setId(new MissionFlowId(mission.getId(), defaultFlow.getId()));
+                mf.setExecOrder(0);
+                mf.setStatus("ACTIVE");
+                missionFlowRepository.save(mf);
+            }
             return;
         }
 

@@ -20,6 +20,7 @@ public class SkillRequest {
     @Size(max = 2000)
     private String description;
 
+    private String content;
     private String category;
     private Object validationRules;
     private Object executionParameters;

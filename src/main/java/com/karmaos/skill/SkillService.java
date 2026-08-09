@@ -16,10 +16,13 @@ public class SkillService {
 
     private final SkillRepository skillRepository;
     private final AgentSkillRepository agentSkillRepository;
+    private final ObjectMapper objectMapper;
 
-    public SkillService(SkillRepository skillRepository, AgentSkillRepository agentSkillRepository) {
+    public SkillService(SkillRepository skillRepository, AgentSkillRepository agentSkillRepository,
+                        ObjectMapper objectMapper) {
         this.skillRepository = skillRepository;
         this.agentSkillRepository = agentSkillRepository;
+        this.objectMapper = objectMapper;
     }
 
     public List<SkillResponse> list() {
@@ -41,6 +44,7 @@ public class SkillService {
         Skill skill = new Skill();
         skill.setName(request.getName());
         skill.setDescription(request.getDescription());
+        skill.setContent(request.getContent());
         skill.setCategory(request.getCategory());
         skill.setStatus("ACTIVE");
         skill = skillRepository.save(skill);
@@ -53,9 +57,22 @@ public class SkillService {
                 .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Skill not found: " + id));
         skill.setName(request.getName());
         skill.setDescription(request.getDescription());
+        skill.setContent(request.getContent());
         skill.setCategory(request.getCategory());
+        skill.setValidationRules(toJson(request.getValidationRules()));
+        skill.setExecutionParameters(toJson(request.getExecutionParameters()));
         skill = skillRepository.save(skill);
         return toResponse(skill);
+    }
+
+    private String toJson(Object value) {
+        if (value == null) return null;
+        if (value instanceof String s) return s;
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return String.valueOf(value);
+        }
     }
 
     @Transactional
@@ -100,6 +117,9 @@ public class SkillService {
                 .id(s.getId())
                 .name(s.getName())
                 .description(s.getDescription())
+                .content(s.getContent())
+                .validationRules(parseJson(s.getValidationRules()))
+                .executionParameters(parseJson(s.getExecutionParameters()))
                 .category(s.getCategory())
                 .status(s.getStatus())
                 .assignedAgentCount(assignedAgentCount)
@@ -107,5 +127,14 @@ public class SkillService {
                 .createdAt(s.getCreatedAt())
                 .updatedAt(s.getUpdatedAt())
                 .build();
+    }
+
+    private Object parseJson(String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return objectMapper.readTree(value);
+        } catch (Exception e) {
+            return value;
+        }
     }
 }

@@ -14,4 +14,11 @@ public class VideoRequest {
     private int fps = 30;
     private String resolution = "1920x1080";
     private double transitionDuration = 1.0;
+    /** Optional background music (data URI or URL) for the Remotion provider. */
+    private String musicUrl;
+    /** Intro card branding (Remotion provider). */
+    private String introTitle;
+    private String introSubtitle;
+    private String brandingLogo;
+    private String brandingFooter;
 }

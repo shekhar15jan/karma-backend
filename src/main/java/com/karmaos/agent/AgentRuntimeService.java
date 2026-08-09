@@ -1,5 +1,6 @@
 package com.karmaos.agent;
 
+import com.karmaos.common.StrictJson;
 import com.karmaos.execution.ExecutionService;
 import com.karmaos.execution.ExecutionStep;
 import com.karmaos.flow.Flow;
@@ -137,8 +138,16 @@ public class AgentRuntimeService {
             step.setCost(calculateCost(modelUsed, response.getPromptTokens(), response.getCompletionTokens()));
 
             if (response.isSuccess()) {
-                step.setStatus("COMPLETED");
-                step.setOutputData(response.getContent());
+                if (isStoryScriptWriter(agent) && !isOutputValidFor(agent, response.getContent())) {
+                    log.error("Script Agent exhausted 3 retries without producing a valid script JSON");
+                    step.setStatus("FAILED");
+                    step.setErrorMessage("Script agent produced no valid script JSON after all retries. "
+                            + "Reasoning prose consumed the output budget. Reduce scene count, raise the model "
+                            + "output cap, or switch the agent to a non-reasoning model.");
+                } else {
+                    step.setStatus("COMPLETED");
+                    step.setOutputData(response.getContent());
+                }
             } else {
                 step.setStatus("FAILED");
                 step.setErrorMessage(response.getErrorMessage());
@@ -196,7 +205,7 @@ public class AgentRuntimeService {
 
                 lastResponse = llmProvider.chat(request);
 
-                if (lastResponse.isSuccess() && StepContextDistiller.isValidOutput(lastResponse.getContent())) {
+                if (lastResponse.isSuccess() && isOutputValidFor(agent, lastResponse.getContent())) {
                     if (attempt > 1 || provider != primaryProvider) {
                         log.info("Agent {} produced valid output on attempt {}/{} via provider {}",
                                 agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName());
@@ -205,7 +214,7 @@ public class AgentRuntimeService {
                 }
 
                 String reason = lastResponse.isSuccess()
-                    ? "output was empty, too short, or a stub: " + truncate(lastResponse.getContent(), 160)
+                    ? "output was empty, too short, or did not match the mandated schema: " + truncate(lastResponse.getContent(), 160)
                     : "provider error: " + lastResponse.getErrorMessage();
                 log.warn("Agent {} attempt {}/{} via provider {} failed: {}",
                         agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName(), reason);
@@ -216,10 +225,27 @@ public class AgentRuntimeService {
             }
 
             if (attempt < maxAttempts) {
-                correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was invalid (empty, too short, " +
-                    "or it just stated that you lacked source material). Do NOT say you have no context or no " +
-                    "source material. Produce complete, substantive, well-structured content for the requested " +
-                    "deliverable using the mission topic provided. Respond with the full deliverable only.";
+                if (isStoryScriptWriter(agent)) {
+                    correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was rejected because it did NOT "
+                        + "conform to the mandated JSON schema defined in your assigned skill (\"Video Script Generator\"). "
+                        + "Respond with a SINGLE raw JSON object only (no markdown "
+                        + "fences, no ```json, no preamble, no commentary) that has EXACTLY these top-level fields: "
+                        + "{\"title\": \"...\", \"script_body\": [ {\"scene_number\": 1, \"speaker_text\": \"...\", "
+                        + "\"visual_description\": \"...\", \"visual_spec\": { \"theme\": \"codeatcloud\", \"layout\": \"presentation\", "
+                        + "\"title\": \"...\", \"content_blocks\": [ "
+                        + "{\"heading\": \"...\", \"text\": \"...\"} ] } } ] }. "
+                        + "The \"script_body\" MUST be a non-empty JSON array of scene objects; each scene MUST have "
+                        + "\"scene_number\", \"speaker_text\" and a \"visual_spec\" object. Each \"visual_spec\" MUST have either a "
+                        + "\"components\" array OR a \"content_blocks\" array for presentation layouts. "
+                        + "Follow the layouts, themes and component vocabulary from your assigned skill. "
+                        + "Do NOT output a content strategy, outline, plan, or any other JSON shape. Output ONLY the "
+                        + "script_body JSON object.";
+                } else {
+                    correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was invalid (empty, too short, " +
+                        "or it just stated that you lacked source material). Do NOT say you have no context or no " +
+                        "source material. Produce complete, substantive, well-structured content for the requested " +
+                        "deliverable using the mission topic provided. Respond with the full deliverable only.";
+                }
             }
         }
 
@@ -256,10 +282,14 @@ public class AgentRuntimeService {
             sb.append("Mission type: ").append(mission.getMissionType() != null ? mission.getMissionType() : "GENERAL").append("\n\n");
         }
 
+        boolean mandatedFormat = false;
         if (agent != null && agent.getDefaultPromptId() != null) {
             Prompt prompt = promptRepository.findById(agent.getDefaultPromptId()).orElse(null);
             if (prompt != null) {
                 sb.append(prompt.getContent()).append("\n\n");
+                String pc = prompt.getContent().toLowerCase();
+                mandatedFormat = pc.contains("return valid json") || pc.contains("output format")
+                        || pc.contains("exact structure") || pc.contains("json schema");
             }
         }
 
@@ -272,12 +302,26 @@ public class AgentRuntimeService {
         }
 
         sb.append("\nRespond with well-structured content. Use Markdown formatting where appropriate.");
+        if (mandatedFormat) {
+            sb.append("\nIMPORTANT: If the prompt above mandates a specific output format (e.g. a JSON schema), "
+                    .concat("you MUST follow it exactly. Do not switch to Markdown prose or discuss your reasoning in the output. ")
+                    .concat("Produce ONLY the required structured output."));
+        }
 
         List<Skill> skills = getAgentSkills(agent != null ? agent.getId() : null);
         if (!skills.isEmpty()) {
-            sb.append("\n\nAvailable skills:\n");
+            sb.append("\n\nBehavioral contract from your assigned skills (MANDATORY, overrides any conflicting instruction above):\n");
             for (Skill s : skills) {
-                sb.append("- ").append(s.getName()).append(": ").append(s.getDescription()).append("\n");
+                sb.append("\n### Skill: ").append(s.getName()).append("\n");
+                if (s.getContent() != null && !s.getContent().isBlank()) {
+                    sb.append(s.getContent()).append("\n");
+                } else {
+                    sb.append(s.getDescription() != null ? s.getDescription() : "").append("\n");
+                }
+                String rules = s.getValidationRules();
+                if (rules != null && !rules.isBlank() && !"{}".equals(rules.trim())) {
+                    sb.append("Output validation rules: ").append(rules).append("\n");
+                }
             }
         }
 
@@ -296,17 +340,12 @@ public class AgentRuntimeService {
         if (isStoryScriptWriter(agent)) {
             StoryTarget target = configuredStoryTarget(agent, missionId);
             sb.append("\n\nOUTPUT FORMAT REQUIREMENT (MANDATORY):\n")
-              .append("If the upstream context instructs you to write a story / narration script for a video, ")
-              .append("respond with a single valid JSON object (no markdown fences) conforming to this exact schema:\n")
-              .append("{\n")
-              .append("  \"title\": \"short title of the story\",\n")
-              .append("  \"script_body\": [\n")
-              .append("    { \"scene_number\": 1,\n")
-              .append("      \"speaker_text\": \"exact narration to be spoken for this scene\",\n")
-              .append("      \"image_prompt\": \"detailed visual description used to generate this scene's picture\",\n")
-              .append("      \"visual_description\": \"what appears on screen\" }\n")
-              .append("  ]\n")
-              .append("}\n")
+              .append("Respond with a single valid JSON object (no markdown fences, no preamble, no commentary). ")
+              .append("Your output must be raw JSON only. The exact JSON schema, per-scene visual spec, allowed layouts, ")
+              .append("themes, and component vocabulary are defined by the behavioral contract of your assigned skill above ")
+              .append("(\"Video Script Generator\"). The skill is the SINGLE source of truth for the schema — do not invent a ")
+              .append("different shape. Every scene MUST carry the skill's per-scene visual spec object with a non-empty ")
+              .append("components array; each component needs a unique \"id\".\n")
               .append("You MUST write a full-length script that assembles into a target video of roughly ")
               .append(target.targetDurationSeconds).append(" seconds. Write exactly ").append(target.minScenes)
               .append(" to ").append(target.maxScenes).append(" scenes. ")
@@ -315,9 +354,14 @@ public class AgentRuntimeService {
               .append("-").append(target.wordsPerScene + 25)
               .append(" words (spoken at ~2.3 words per second, so each scene is roughly ")
               .append(Math.round(target.wordsPerScene / 2.3)).append("-").append(Math.round((target.wordsPerScene + 25) / 2.3))
-              .append(" seconds). Keep characters visually consistent in appearance, colours and outfits across ALL scenes. ")
-              .append("Each image_prompt must be a self-contained, vivid visual description suitable for an image generator. ")
-              .append("Make the story wholesome, complete, and non-branded.");
+              .append(" seconds). ")
+              .append("Make the script complete and non-branded. ")
+              .append("STRICT CONTENT SAFETY RULES: The content must be family-friendly, age-appropriate and suitable for all audiences. ")
+              .append("ABSOLUTELY FORBIDDEN: any violence, fighting, war, weapons, guns, swords, blood, gore, injury, death, killing, ")
+              .append("fear, horror, nudity, adult/sexual content, drugs, alcohol, smoking, or anything inappropriate. ")
+              .append("Follow the behavioral contract described in the skill above for style, tone and diagram rules.\n")
+              .append("REPEAT: Output ONLY the raw JSON object described by your skill. Do NOT include markdown headings, bullet lists, ")
+              .append("explanatory prose, chain-of-thought reasoning, or any text outside the JSON.");
         }
 
         return sb.toString();
@@ -329,6 +373,69 @@ public class AgentRuntimeService {
         String c = agent.getCategory() != null ? agent.getCategory().toLowerCase() : "";
         return n.contains("script") || n.contains("story") || n.contains("narrat")
             || c.contains("script") || c.contains("story");
+    }
+
+    /**
+     * Validates an LLM step's output. For story/script agents the output must be a
+     * raw JSON object whose top-level "script_body" is a non-empty array, otherwise
+     * the response is treated as invalid and the retry loop corrects it.
+     */
+    private boolean isOutputValidFor(Agent agent, String content) {
+        if (!StepContextDistiller.isValidOutput(content)) {
+            return false;
+        }
+        if (isStoryScriptWriter(agent)) {
+            try {
+                JsonNode root = StrictJson.extractLastObject(content);
+                if (root == null) {
+                    return false;
+                }
+                JsonNode body = root.get("script_body");
+                if (body == null || !body.isArray() || body.size() == 0) {
+                    return false;
+                }
+                StoryTarget target = configuredStoryTarget(agent, null);
+                int minScenes = Math.max(1, target.minScenes());
+                if (body.size() < minScenes) {
+                    log.info("Script output rejected: {} scenes found, minimum required is {}",
+                            body.size(), minScenes);
+                    return false;
+                }
+                for (JsonNode scene : body) {
+                    JsonNode spec = scene != null
+                        ? (scene.hasNonNull("visual_spec") ? scene.get("visual_spec") : scene.get("diagram_spec"))
+                        : null;
+                    if (spec == null || !spec.isObject()) {
+                        return false;
+                    }
+                    JsonNode shapes = spec.has("components") ? spec.get("components") : spec.get("shapes");
+                    JsonNode blocks = spec.get("content_blocks");
+                    
+                    if ((shapes == null || !shapes.isArray() || shapes.size() == 0) &&
+                        (blocks == null || !blocks.isArray() || blocks.size() == 0)) {
+                        return false;
+                    }
+                    if (shapes != null && shapes.isArray()) {
+                        for (JsonNode shape : shapes) {
+                            if (shape == null || !shape.hasNonNull("id") || !shape.hasNonNull("label")) {
+                                return false;
+                            }
+                        }
+                    }
+                    if (blocks != null && blocks.isArray()) {
+                        for (JsonNode block : blocks) {
+                            if (block == null || !block.hasNonNull("heading") || !block.hasNonNull("text")) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private StoryTarget configuredStoryTarget(Agent agent, UUID missionId) {
@@ -467,11 +574,10 @@ public class AgentRuntimeService {
             int modelOutputCap = runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_SCRIPT, 8192);
             StoryTarget target = configuredStoryTarget(agent, missionId);
             int needed = Math.max(target.maxScenes(), target.minScenes()) * 220;
-            int budget = Math.min(needed, modelOutputCap);
-            if (budget > reasoning) {
-                log.info("Story script target {} scenes needs ~{} tokens; raising budget from {} to {} (capped at model output cap)",
-                        Math.max(target.maxScenes(), target.minScenes()), needed, reasoning, budget);
-                return budget;
+            if (modelOutputCap > reasoning) {
+                log.info("Story script target {} scenes needs ~{} tokens; raising budget from {} to {} (model output cap)",
+                        Math.max(target.maxScenes(), target.minScenes()), needed, reasoning, modelOutputCap);
+                return modelOutputCap;
             }
         }
         return reasoning;

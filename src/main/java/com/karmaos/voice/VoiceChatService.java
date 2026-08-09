@@ -7,6 +7,8 @@ import com.karmaos.agent.AgentResponse;
 import com.karmaos.agent.AgentService;
 import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionRepository;
+import com.karmaos.flow.Flow;
+import com.karmaos.flow.FlowRepository;
 import com.karmaos.knowledge.EmbeddingService;
 import com.karmaos.knowledge.KarmaDocService;
 import com.karmaos.knowledge.KarmaDocService.DocEntry;
@@ -57,6 +59,7 @@ public class VoiceChatService {
     private final OwnershipService ownershipService;
     private final WorkspaceRepository workspaceRepository;
     private final ProjectRepository projectRepository;
+    private final FlowRepository flowRepository;
     private final KarmaMemoryService karmaMemoryService;
     private final EmbeddingService embeddingService;
     private final RuntimeSettings runtimeSettings;
@@ -68,6 +71,7 @@ public class VoiceChatService {
                             LLMProviderFactory llmProviderFactory, ObjectMapper objectMapper,
                             KarmaDocService karmaDocService, OwnershipService ownershipService,
                             WorkspaceRepository workspaceRepository, ProjectRepository projectRepository,
+                            FlowRepository flowRepository,
                             KarmaMemoryService karmaMemoryService, EmbeddingService embeddingService,
                             RuntimeSettings runtimeSettings) {
         this.agentService = agentService;
@@ -83,6 +87,7 @@ public class VoiceChatService {
         this.ownershipService = ownershipService;
         this.workspaceRepository = workspaceRepository;
         this.projectRepository = projectRepository;
+        this.flowRepository = flowRepository;
         this.karmaMemoryService = karmaMemoryService;
         this.embeddingService = embeddingService;
         this.runtimeSettings = runtimeSettings;
@@ -551,6 +556,22 @@ public class VoiceChatService {
             sb.append("- Workspaces: unavailable\n");
         }
 
+        // Active flows (with IDs, so Karma can link them to missions)
+        try {
+            List<Flow> flows = flowRepository.findByStatus("ACTIVE");
+            if (flows.isEmpty()) {
+                sb.append("- Active Flows: none\n");
+            } else {
+                sb.append("- Active Flows:\n");
+                for (Flow f : flows) {
+                    sb.append("  * ").append(f.getName()).append(" (id=").append(f.getId())
+                      .append(", category=").append(f.getCategory()).append(")\n");
+                }
+            }
+        } catch (Exception e) {
+            sb.append("- Active Flows: unavailable\n");
+        }
+
         // System health
         try {
             double cpu = systemInfoService.getCpuLoad();
@@ -619,7 +640,7 @@ public class VoiceChatService {
         sb.append("  * \"navigate\": params { \"page\": \"dashboard|mission-control|executions|reviews|publishing|workspaces|agents|providers|calendar|knowledge|prompts|flows|artifacts|analytics|settings\" } — go to that screen.\n");
         sb.append("  * \"create_workspace\": params { \"name\", \"description\" } — actually create a workspace now. Use the name the user gave.\n");
         sb.append("  * \"create_project\": params { \"workspaceId\", \"name\" } — actually create a project in that workspace (use an id from the live Workspaces list; omit if unknown).\n");
-        sb.append("  * \"create_mission\": params { \"projectId\", \"name\", \"description\", \"missionType\", \"priority\", \"providerId\" } — actually create the mission now (no form). Only emit if you have a valid projectId from the live state; otherwise use \"prefill_mission\".\n");
+        sb.append("  * \"create_mission\": params { \"projectId\", \"name\", \"description\", \"missionType\", \"priority\", \"providerId\", \"selectedFlowIds\": [\"flowId\"], \"targetDurationSeconds\": 900, \"runMode\": \"AUTO|REVIEW\" } — actually create the mission now (no form). Only emit if you have a valid projectId from the live state; otherwise use \"prefill_mission\". When the user asks to run it too, include the matching ACTIVE flow id(s) from the Active Flows list in \"selectedFlowIds\" and the requested duration, plus \"runMode\" — the UI will then create AND start the execution automatically. If no flow id is known, emit without selectedFlowIds and the mission will be created but must be run later after linking a flow.\n");
         sb.append("  * \"trigger_mission\": params { \"missionId\", \"runMode\": \"REVIEW|AUTO\" } — start executing an existing mission now (use an id from Recent Missions; runMode defaults to the user's preference or REVIEW).\n");
         sb.append("  * \"approve_artifact\": params { \"id\" } — approve a pending artifact review.\n");
         sb.append("  * \"reject_artifact\": params { \"id\" } — reject a pending artifact review.\n");

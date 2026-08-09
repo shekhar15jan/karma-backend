@@ -18,6 +18,9 @@ public class SkillResponse {
     private UUID id;
     private String name;
     private String description;
+    private String content;
+    private Object validationRules;
+    private Object executionParameters;
     private String category;
     private String status;
     private int assignedAgentCount;

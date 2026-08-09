@@ -56,6 +56,7 @@ public class EdgeTtsProvider implements VoiceProvider {
     public VoiceResponse synthesize(VoiceRequest request) {
         long start = System.currentTimeMillis();
         Path tempFile = null;
+        Path textFile = null;
         try {
             String text = request.getText();
             if (text == null || text.isBlank()) {
@@ -69,6 +70,8 @@ public class EdgeTtsProvider implements VoiceProvider {
             String rate = toEdgeTtsRate(speed);
 
             tempFile = Files.createTempFile("edge_tts_", ".mp3");
+            textFile = Files.createTempFile("edge_tts_text_", ".txt");
+            Files.writeString(textFile, text, java.nio.charset.StandardCharsets.UTF_8);
 
             boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
             ProcessBuilder pb;
@@ -76,7 +79,7 @@ public class EdgeTtsProvider implements VoiceProvider {
                 pb = new ProcessBuilder(
                     "cmd.exe", "/c", "python", "-m", "edge_tts",
                     "--voice", voice,
-                    "--text", text,
+                    "--file", textFile.toAbsolutePath().toString(),
                     "--rate", rate,
                     "--write-media", tempFile.toAbsolutePath().toString()
                 );
@@ -84,7 +87,7 @@ public class EdgeTtsProvider implements VoiceProvider {
                 pb = new ProcessBuilder(
                     "python3", "-m", "edge_tts",
                     "--voice", voice,
-                    "--text", text,
+                    "--file", textFile.toAbsolutePath().toString(),
                     "--rate", rate,
                     "--write-media", tempFile.toAbsolutePath().toString()
                 );
@@ -127,6 +130,9 @@ public class EdgeTtsProvider implements VoiceProvider {
         } finally {
             if (tempFile != null) {
                 try { Files.deleteIfExists(tempFile); } catch (IOException ignored) {}
+            }
+            if (textFile != null) {
+                try { Files.deleteIfExists(textFile); } catch (IOException ignored) {}
             }
         }
     }
