@@ -34,8 +34,7 @@ public class SettingsService {
         RuntimeSettings.KEY_VIDEO_TARGET_DURATION, 900,
         RuntimeSettings.KEY_VIDEO_MIN_SCENES, 30,
         RuntimeSettings.KEY_VIDEO_MAX_SCENES, 36,
-        RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 70,
-        RuntimeSettings.KEY_VIDEO_FFMPEG_TIMEOUT, 1200
+        RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 70
     );
 
     public SettingsResponse getByWorkspaceAndUser(UUID workspaceId, UUID userId) {

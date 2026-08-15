@@ -44,7 +44,7 @@ import java.util.stream.Collectors;
 public class VoiceChatService {
 
     private static final Logger log = LoggerFactory.getLogger(VoiceChatService.class);
-    private static final String LLM_MODEL = "deepseek-v4-flash-free";
+    private static final String LLM_MODEL = "gemini-2.5-flash";
 
     private final AgentService agentService;
     private final ProviderRepository providerRepository;

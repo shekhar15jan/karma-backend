@@ -11,6 +11,8 @@ import com.karmaos.llm.LLMProvider;
 import com.karmaos.llm.LLMProviderFactory;
 import com.karmaos.llm.LLMRequest;
 import com.karmaos.llm.LLMResponse;
+import com.karmaos.llm.cache.LlmCache;
+import com.karmaos.llm.cache.LlmCacheRepository;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
 import com.karmaos.memory.KarmaMemoryService;
@@ -38,8 +40,11 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
 
 @Service
 public class AgentRuntimeService {
@@ -66,6 +71,7 @@ public class AgentRuntimeService {
     private final KarmaMemoryService karmaMemoryService;
     private final ObjectMapper objectMapper;
     private final RuntimeSettings runtimeSettings;
+    private final LlmCacheRepository llmCacheRepository;
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
                                ProviderRepository providerRepository,
@@ -82,7 +88,8 @@ public class AgentRuntimeService {
                                WorkspaceRepository workspaceRepository,
                                KarmaMemoryService karmaMemoryService,
                                ObjectMapper objectMapper,
-                               RuntimeSettings runtimeSettings) {
+                               RuntimeSettings runtimeSettings,
+                               LlmCacheRepository llmCacheRepository) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -99,6 +106,7 @@ public class AgentRuntimeService {
         this.karmaMemoryService = karmaMemoryService;
         this.objectMapper = objectMapper;
         this.runtimeSettings = runtimeSettings;
+        this.llmCacheRepository = llmCacheRepository;
     }
 
     public ExecutionStep executeAgentStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
@@ -203,7 +211,22 @@ public class AgentRuntimeService {
                 step.setModelUsed(modelUsed);
                 step.setPromptUsed(systemPrompt + "\n\n" + userMessage + correctiveHint);
 
-                lastResponse = llmProvider.chat(request);
+                String hashKey = computeHash(modelUsed, systemPrompt, userMessage + correctiveHint, resolveTemperature(agent));
+                LlmCache cached = llmCacheRepository.findById(hashKey).orElse(null);
+                
+                if (cached != null) {
+                    log.info("LLM Cache hit for agent {} model {}", agent != null ? agent.getName() : "?", modelUsed);
+                    lastResponse = LLMResponse.ok(cached.getResponseContent(), modelUsed, 0, 0, 0);
+                } else {
+                    lastResponse = llmProvider.chat(request);
+                    if (lastResponse.isSuccess() && isOutputValidFor(agent, lastResponse.getContent())) {
+                        LlmCache newCache = new LlmCache();
+                        newCache.setHashKey(hashKey);
+                        newCache.setModel(modelUsed);
+                        newCache.setResponseContent(lastResponse.getContent());
+                        llmCacheRepository.save(newCache);
+                    }
+                }
 
                 if (lastResponse.isSuccess() && isOutputValidFor(agent, lastResponse.getContent())) {
                     if (attempt > 1 || provider != primaryProvider) {
@@ -218,6 +241,19 @@ public class AgentRuntimeService {
                     : "provider error: " + lastResponse.getErrorMessage();
                 log.warn("Agent {} attempt {}/{} via provider {} failed: {}",
                         agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName(), reason);
+
+                if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null) {
+                    String err = lastResponse.getErrorMessage().toLowerCase();
+                    if (err.contains("429") || err.contains("rate limit") || err.contains("too many requests")) {
+                        long sleepTime = (long) (Math.pow(2, attempt) * 1000) + (long) (Math.random() * 1000);
+                        log.warn("Rate limit hit, applying exponential backoff. Sleeping for {} ms before retry", sleepTime);
+                        try {
+                            Thread.sleep(sleepTime);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                }
 
                 if (attempt >= maxAttempts) {
                     continue;
@@ -254,6 +290,25 @@ public class AgentRuntimeService {
             return LLMResponse.error("No usable LLM provider available");
         }
         return lastResponse;
+    }
+
+    private String computeHash(String model, String system, String user, double temp) {
+        try {
+            String payload = model + "|" + system + "|" + user + "|" + temp;
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] encodedhash = digest.digest(payload.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hexString = new StringBuilder(2 * encodedhash.length);
+            for (byte b : encodedhash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) {
+                    hexString.append('0');
+                }
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            return UUID.randomUUID().toString();
+        }
     }
 
     private String truncate(String s, int max) {
@@ -417,7 +472,7 @@ public class AgentRuntimeService {
                     }
                     if (shapes != null && shapes.isArray()) {
                         for (JsonNode shape : shapes) {
-                            if (shape == null || !shape.hasNonNull("id") || !shape.hasNonNull("label")) {
+                            if (shape == null || !shape.isObject()) {
                                 return false;
                             }
                         }

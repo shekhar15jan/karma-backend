@@ -103,7 +103,7 @@ public class ExecutionOrchestrator {
 
     @Transactional
     public Execution startExecution(UUID missionId) {
-        return startExecution(missionId, MODE_REVIEW);
+        return startExecution(missionId, MODE_AUTO);
     }
 
     @Transactional
@@ -136,7 +136,7 @@ public class ExecutionOrchestrator {
      */
     @Transactional
     public Execution startExecutionAfterCommit(UUID missionId) {
-        return startExecutionAfterCommit(missionId, MODE_REVIEW);
+        return startExecutionAfterCommit(missionId, MODE_AUTO);
     }
 
     @Transactional
@@ -371,7 +371,7 @@ public class ExecutionOrchestrator {
             updateMissionStatus(missionId, "FAILED");
             return;
         }
-        String mode = execution.getMode() != null ? execution.getMode() : MODE_REVIEW;
+        String mode = execution.getMode() != null ? execution.getMode() : MODE_AUTO;
         Meta meta = readMeta(execution);
         int startIndex = meta.resumeIndex;
         String previousOutput = meta.previousOutput != null ? meta.previousOutput : meta.feedback;
@@ -398,6 +398,19 @@ public class ExecutionOrchestrator {
                     nodeOutputs.put(sp.nodeId, step.getOutputData());
                 }
                 previousOutput = step.getOutputData();
+                
+                // AUTOMATED QUALITY LOOP
+                if (previousOutput != null && previousOutput.contains("\"revise_and_resubmit\"")) {
+                    log.info("Automated Critic requested revision. Restarting from previous steps with feedback.");
+                    emitExecutionEvent(executionId, "execution.quality_loop", "{\"message\":\"Quality scores below threshold, auto-reprompting\"}");
+                    
+                    // Simple heuristic: re-run the previous agent (index - 1) with this output as feedback
+                    if (i > 0) {
+                        i = i - 2; // Subtract 2 because loop will do i++ next iteration, effectively jumping to i-1
+                        continue;
+                    }
+                }
+
                 updateMissionProgress(missionId,
                         totalSteps > 0 ? (int) Math.round(((i + 1) * 100.0) / totalSteps) : 100);
                 emitExecutionEvent(executionId, "step.completed",

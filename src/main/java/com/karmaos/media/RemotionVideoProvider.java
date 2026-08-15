@@ -98,6 +98,29 @@ public class RemotionVideoProvider implements VideoProvider {
             }
         }
 
+        // Captions config
+        if (request.getCaptions() != null) {
+            ObjectNode captionsNode = objectMapper.createObjectNode();
+            captionsNode.put("burnIn", request.getCaptions().isBurnIn());
+            captionsNode.put("preset", request.getCaptions().getPreset() != null ? request.getCaptions().getPreset() : "youtube");
+            captionsNode.put("position", request.getCaptions().getPosition());
+            captionsNode.put("fontSize", request.getCaptions().getFontSize());
+            captionsNode.put("maxCharsPerLine", request.getCaptions().getMaxCharsPerLine());
+            body.set("captions", captionsNode);
+        }
+
+        // Chapters
+        if (request.getChapters() != null && !request.getChapters().isEmpty()) {
+            ArrayNode chaptersArray = objectMapper.createArrayNode();
+            for (VideoChapter ch : request.getChapters()) {
+                ObjectNode chNode = objectMapper.createObjectNode();
+                chNode.put("title", ch.getTitle());
+                chNode.put("startTime", ch.getStartTime());
+                chaptersArray.add(chNode);
+            }
+            body.set("chapters", chaptersArray);
+        }
+
         ArrayNode scenes = objectMapper.createArrayNode();
         List<VideoScene> sceneList = request.getScenes() != null ? request.getScenes() : List.of();
         for (VideoScene scene : sceneList) {
@@ -112,11 +135,24 @@ public class RemotionVideoProvider implements VideoProvider {
             } else {
                 sceneNode.set("visualSpec", emptySpec());
             }
+            if (scene.getSsmlAudioMarkers() != null && !scene.getSsmlAudioMarkers().isBlank()) {
+                try { sceneNode.set("ssmlAudioMarkers", objectMapper.readTree(scene.getSsmlAudioMarkers())); } catch (Exception e) {}
+            }
+            if (scene.getVisualTriggerCues() != null && !scene.getVisualTriggerCues().isBlank()) {
+                try { sceneNode.set("visualTriggerCues", objectMapper.readTree(scene.getVisualTriggerCues())); } catch (Exception e) {}
+            }
+            if (scene.getTimelineEvents() != null && !scene.getTimelineEvents().isBlank()) {
+                try { sceneNode.set("timelineEvents", objectMapper.readTree(scene.getTimelineEvents())); } catch (Exception e) {}
+            }
             if (scene.getAudioUrl() != null && !scene.getAudioUrl().isBlank()) {
                 String audio = toDataUri(scene.getAudioUrl());
                 if (audio != null) {
                     sceneNode.put("audio", audio);
                 }
+            }
+            // Per-scene captions
+            if (scene.getCaptions() != null && !scene.getCaptions().isBlank()) {
+                try { sceneNode.set("captions", objectMapper.readTree(scene.getCaptions())); } catch (Exception e) {}
             }
             scenes.add(sceneNode);
         }

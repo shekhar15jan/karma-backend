@@ -433,7 +433,7 @@ public class FFmpegVideoProvider implements VideoProvider {
             pb.redirectErrorStream(true);
             Process process = pb.start();
             String processOutput = readStream(process.getInputStream());
-            int timeoutSeconds = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_FFMPEG_TIMEOUT, 1200);
+            int timeoutSeconds = 1200;
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();

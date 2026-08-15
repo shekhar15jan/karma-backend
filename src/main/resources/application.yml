@@ -55,6 +55,7 @@ app:
     max-per-user: ${WORKSPACE_MAX_PER_USER:10}
   media:
     visual-only: ${MEDIA_IMAGE_VISUAL_ONLY:true}
+    video-remotion-only: ${MEDIA_VIDEO_REMOTION_ONLY:true}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}
     allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS

@@ -39,7 +39,7 @@ public class MediaOrchestrationService {
 
     private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "cloudflare");
     private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("google", "gemini", "edge-tts", "edge");
-    private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("ffmpeg", "remotion");
+    private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("remotion");
     private static final Set<String> MUSIC_PROVIDER_TYPES = Set.of("google-music");
     private static final Map<String, String> CAPABILITY_PROVIDER_MAP = Map.of(
         "image_generation", "google",
@@ -692,9 +692,9 @@ public class MediaOrchestrationService {
 
         try {
             requireAgentSkill(agentId);
-            Provider provider = resolveProviderForCapability(VIDEO_PROVIDER_TYPES, "ffmpeg");
+            Provider provider = resolveProviderForCapability(VIDEO_PROVIDER_TYPES, "remotion");
             String providerType = provider != null && provider.getProviderType() != null
-                    ? provider.getProviderType().toLowerCase() : "ffmpeg";
+                    ? provider.getProviderType().toLowerCase() : "remotion";
             VideoProvider videoProvider = provider != null
                 ? videoProviderFactory.getProvider(provider.getProviderType(), getApiKey(provider))
                 : videoProviderFactory.getFallbackProvider();
@@ -709,7 +709,7 @@ public class MediaOrchestrationService {
             request.setScript(script);
 
             // Collect upstream artifacts: per-scene audio (by sceneIndex), combined
-            // narration, background music and any scene images (ffmpeg back-compat).
+            // narration, background music and scene images (legacy ffmpeg path disabled).
             List<Artifact> artifacts = artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId);
             java.util.Map<Integer, String> sceneAudio = new java.util.TreeMap<>();
             java.util.Map<Integer, String> sceneImages = new java.util.TreeMap<>();
@@ -740,34 +740,58 @@ public class MediaOrchestrationService {
                 }
             }
 
-            boolean useRemotion = "remotion".equals(providerType) || videoProvider instanceof RemotionVideoProvider;
-
-            if (useRemotion) {
-                List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages);
-                if (scenes.isEmpty()) {
-                    step.setStatus("FAILED");
-                    step.setErrorMessage("Remotion video step found no scenes with a visual spec in the script");
-                    step.setCompletedAt(LocalDateTime.now());
-                    return executionService.saveStep(executionId, step);
-                }
-                request.setScenes(scenes);
-                request.setAudioUrl(audioUrl);
-                request.setMusicUrl(musicUrl);
-                request.setIntroTitle(missionLabel);
-                request.setIntroSubtitle(resolveMissionSubtitle(missionId));
-            } else {
-                List<String> imageUrls = new java.util.ArrayList<>(sceneImages.values());
-                if (imageUrls.isEmpty()) {
-                    log.error("Video composition failed: no images produced upstream for the video (no fallback imagery will be used)");
-                    step.setStatus("FAILED");
-                    step.setErrorMessage("Video composition has no usable images upstream; image step must run first");
-                    step.setCompletedAt(LocalDateTime.now());
-                    return executionService.saveStep(executionId, step);
-                }
-                request.setAudioUrl(audioUrl);
-                request.setImageUrls(imageUrls);
-                request.setScenes(buildScenesFromScript(script, imageUrls));
+            // Remotion is the only supported video provider
+            List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages);
+            if (scenes.isEmpty()) {
+                step.setStatus("FAILED");
+                step.setErrorMessage("Remotion video step found no scenes with a visual spec in the script");
+                step.setCompletedAt(LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
             }
+            
+            // Extract timeline_events from context (from Editor Agent)
+            if (contextData != null && contextData.contains("\"timeline_events\"")) {
+                try {
+                    com.fasterxml.jackson.databind.JsonNode ctxNode = extractJsonNode(contextData);
+                    if (ctxNode != null && ctxNode.has("timeline_events")) {
+                        scenes.get(0).setTimelineEvents(ctxNode.get("timeline_events").toString());
+                    }
+                } catch (Exception ignored) {}
+            }
+            
+            request.setScenes(scenes);
+            request.setAudioUrl(audioUrl);
+            request.setMusicUrl(musicUrl);
+            request.setIntroTitle(missionLabel);
+            request.setIntroSubtitle(resolveMissionSubtitle(missionId));
+            
+            // Captions config (burn-in enabled by default for YouTube-ready output)
+            VideoCaptionsConfig captionsConfig = new VideoCaptionsConfig();
+            captionsConfig.setBurnIn(true);
+            captionsConfig.setPreset("youtube");
+            captionsConfig.setPosition(0.85);
+            captionsConfig.setFontSize(28);
+            captionsConfig.setMaxCharsPerLine(42);
+            request.setCaptions(captionsConfig);
+            
+            // Generate chapters from scenes
+            List<VideoChapter> chapters = new java.util.ArrayList<>();
+            double currentTime = 0;
+            for (int i = 0; i < scenes.size(); i++) {
+                VideoScene scene = scenes.get(i);
+                VideoChapter chapter = new VideoChapter();
+                chapter.setTitle("Chapter " + (i + 1) + ": " + (scene.getText() != null ? scene.getText().substring(0, Math.min(50, scene.getText().length())) : "Scene " + (i + 1)));
+                chapter.setStartTime(currentTime);
+                chapters.add(chapter);
+                // Estimate duration from audio or text
+                if (scene.getAudioUrl() != null) {
+                    // Will be calculated from actual audio duration
+                    currentTime += 10; // rough estimate, will be overridden by actual
+                } else {
+                    currentTime += 8;
+                }
+            }
+            request.setChapters(chapters);
 
             long start = System.currentTimeMillis();
             VideoResponse response = videoProvider.generate(request);
@@ -847,6 +871,8 @@ public class MediaOrchestrationService {
 
         List<String> specJsons = new java.util.ArrayList<>();
         List<String> speakerTexts = new java.util.ArrayList<>();
+        List<String> ssmlMarkers = new java.util.ArrayList<>();
+        List<String> visualCues = new java.util.ArrayList<>();
         try {
             String jsonCandidate = extractJson(script);
             if (jsonCandidate != null) {
@@ -866,6 +892,16 @@ public class MediaOrchestrationService {
                             speakerTexts.add(section.get("speaker_text").asText());
                         } else {
                             speakerTexts.add(section.toString());
+                        }
+                        if (section.hasNonNull("ssml_audio_markers")) {
+                            ssmlMarkers.add(section.get("ssml_audio_markers").toString());
+                        } else {
+                            ssmlMarkers.add(null);
+                        }
+                        if (section.hasNonNull("visual_trigger_cues")) {
+                            visualCues.add(section.get("visual_trigger_cues").toString());
+                        } else {
+                            visualCues.add(null);
                         }
                     }
                 }
@@ -888,6 +924,29 @@ public class MediaOrchestrationService {
             } else if (sceneImages.containsKey(i)) {
                 scene.setImageUrl(sceneImages.get(i));
             }
+            if (i < ssmlMarkers.size() && ssmlMarkers.get(i) != null) {
+                scene.setSsmlAudioMarkers(ssmlMarkers.get(i));
+            }
+            if (i < visualCues.size() && visualCues.get(i) != null) {
+                scene.setVisualTriggerCues(visualCues.get(i));
+            }
+            
+            // Extract captions from script_body section
+            try {
+                String jsonCandidate = extractJson(script);
+                if (jsonCandidate != null) {
+                    com.fasterxml.jackson.databind.JsonNode root =
+                            new com.fasterxml.jackson.databind.ObjectMapper().readTree(jsonCandidate);
+                    com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
+                    if (body != null && body.isArray() && i < body.size()) {
+                        com.fasterxml.jackson.databind.JsonNode section = body.get(i);
+                        if (section.hasNonNull("captions") && section.get("captions").isArray()) {
+                            scene.setCaptions(section.get("captions").toString());
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+            
             String perScene = sceneAudio.get(i);
             scene.setAudioUrl(perScene != null ? perScene : combinedAudio);
             scenes.add(scene);

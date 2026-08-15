@@ -21,4 +21,10 @@ public class VideoRequest {
     private String introSubtitle;
     private String brandingLogo;
     private String brandingFooter;
+
+    /** Caption settings for the Remotion provider. */
+    private VideoCaptionsConfig captions;
+    
+    /** Chapter markers for YouTube (Remotion provider). */
+    private List<VideoChapter> chapters;
 }

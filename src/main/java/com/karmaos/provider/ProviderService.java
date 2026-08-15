@@ -33,7 +33,7 @@ public class ProviderService {
 
 private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode",
-            "edge-tts", "edge", "ffmpeg", "google-music", "cloudflare");
+            "edge-tts", "edge", "remotion", "google-music", "cloudflare");
 
     private static final Set<String> LLM_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode");
@@ -44,7 +44,7 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
 
     private static final Set<String> MUSIC_TYPES = Set.of("google-music");
 
-    private static final Set<String> KEYLESS_TYPES = Set.of("edge-tts", "edge", "ffmpeg");
+    private static final Set<String> KEYLESS_TYPES = Set.of("edge-tts", "edge", "remotion");
 
     private final ProviderRepository providerRepository;
     private final ObjectMapper objectMapper;
@@ -221,7 +221,7 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
                     return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
                 }
                 ok = imageProviderFactory.getProvider(type, apiKey, apiEndpoint).testConnection();
-            } else if ("ffmpeg".equals(type)) {
+            } else if ("remotion".equals(type)) {
                 ok = videoProviderFactory.getProvider(type, apiKey).testConnection();
             } else {
                 return Map.of("success", false, "message", "Unsupported provider type", "modelCount", 0);
@@ -260,7 +260,7 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
     }
 
     private List<String> fetchModelsFor(Provider provider, String type, String apiKey, String apiEndpoint) {
-        if ("ffmpeg".equals(type) || "edge".equals(type) || "edge-tts".equals(type)) {
+        if ("remotion".equals(type) || "edge".equals(type) || "edge-tts".equals(type)) {
             return null;
         }
         if (hasImagenModel(provider)) {
