@@ -2,6 +2,7 @@ package com.karmaos.media;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.settings.RuntimeSettings;
+import com.karmaos.sse.SseController;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,6 +21,7 @@ public class VideoProviderFactory {
     private final WebClient.Builder webClientBuilder;
     private final RuntimeSettings runtimeSettings;
     private final ObjectMapper objectMapper;
+    private final SseController sseController;
     private final String rendererUrl;
     /** When true, only the Remotion provider is allowed; the FFmpeg and Mock
      *  (fallback) video paths are disabled. Controlled by MEDIA_VIDEO_REMOTION_ONLY. */
@@ -29,11 +31,13 @@ public class VideoProviderFactory {
     public VideoProviderFactory(WebClient.Builder webClientBuilder,
                                 RuntimeSettings runtimeSettings,
                                 ObjectMapper objectMapper,
+                                SseController sseController,
                                 @Value("${RENDERER_URL:http://localhost:3000}") String rendererUrl,
                                 @Value("${media.video-remotion-only:true}") boolean remotionOnly) {
         this.webClientBuilder = webClientBuilder;
         this.runtimeSettings = runtimeSettings;
         this.objectMapper = objectMapper;
+        this.sseController = sseController;
         this.rendererUrl = rendererUrl;
         this.remotionOnly = remotionOnly;
     }
@@ -55,7 +59,7 @@ public class VideoProviderFactory {
             return disabledProvider(providerType);
         }
         return switch (providerType.toLowerCase()) {
-            case "remotion" -> new RemotionVideoProvider(rendererUrl, objectMapper);
+            case "remotion" -> new RemotionVideoProvider(rendererUrl, objectMapper, sseController);
             default -> {
                 log.warn("Unsupported video provider type: {}, using mock", providerType);
                 yield getFallbackProvider();

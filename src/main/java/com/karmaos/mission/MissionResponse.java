@@ -25,6 +25,7 @@ public class MissionResponse {
     private int progress;
     private String outputDirectory;
     private Integer targetDurationSeconds;
+    private String theme;
     private LocalDateTime startedAt;
     private LocalDateTime completedAt;
     private LocalDateTime createdAt;

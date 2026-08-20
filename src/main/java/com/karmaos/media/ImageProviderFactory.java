@@ -43,7 +43,6 @@ public class ImageProviderFactory {
             case "google", "gemini" -> new GoogleImageProvider(apiKey, webClientBuilder, objectMapper);
             case "cloudflare" -> new CloudflareWorkersAIImageProvider(apiKey, extractAccountId(apiEndpoint), webClientBuilder);
             case "diagram", "diagram-image" -> new DiagramImageProvider();
-            case "visual", "visual-engine" -> new VisualRenderImageProvider();
             default -> {
                 log.warn("Unsupported image provider type: {}, using mock", providerType);
                 yield getFallbackProvider();

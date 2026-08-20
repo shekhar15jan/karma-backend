@@ -34,6 +34,8 @@ import com.karmaos.settings.RuntimeSettings;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -42,6 +44,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
@@ -53,6 +56,23 @@ public class AgentRuntimeService {
     private static final Map<String, Double> COST_PER_TOKEN = Map.of(
         "gemini-1.5-pro", 1.25e-6,
         "gemini-1.5-flash", 0.075e-6
+    );
+
+    /** Layouts the karma-renderer video path actually implements (skill contract). */
+    private static final Set<String> ALLOWED_LAYOUTS = Set.of(
+        "title-slide", "section-header", "standard-content", "two-column", "split-image",
+        "architecture-diagram", "feature-grid", "big-number", "comparison", "quote",
+        "code-explainer", "terminal-walkthrough", "roadmap-timeline",
+        "bento", "dashboard", "infographic"
+    );
+
+    /** Component vocabulary the video renderer supports. Anything else is rejected/coerced. */
+    private static final Set<String> ALLOWED_COMPONENT_TYPES = Set.of(
+        "heading", "paragraph", "text", "bullet-list", "code", "command",
+        "card", "info-card", "warning-card", "stat-card", "quote-card",
+        "bar-chart", "donut-chart", "progress-bar", "profile-card",
+        "microservice-node", "api-gateway", "message-queue", "docker-node", "kubernetes-node",
+        "logging-node", "browser-node", "aws-node", "azure-node", "gcp-node", "language-node"
     );
 
     private final LLMProviderFactory providerFactory;
@@ -120,6 +140,7 @@ public class AgentRuntimeService {
         step.setStatus("RUNNING");
         step.setStartedAt(LocalDateTime.now());
         step.setInputData(contextData);
+        step = executionService.saveStep(executionId, step);
 
         try {
             Flow flow = flowRepository.findByIdAndStatus(flowId, "ACTIVE").orElse(null);
@@ -134,6 +155,14 @@ public class AgentRuntimeService {
 
             Provider primaryProvider = resolveProvider(agent);
             step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
+
+            if (isStoryScriptWriter(agent) && isIterativeScriptMode(agent)) {
+                String merged = generateScriptIteratively(agent, flow, missionId, contextData, step);
+                step.setStatus("COMPLETED");
+                step.setOutputData(merged);
+                step.setCompletedAt(LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
+            }
 
             LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
                     systemPrompt, userMessage, missionId, resolveMaxTokens(flow, agent, missionId));
@@ -171,6 +200,393 @@ public class AgentRuntimeService {
     }
 
     /**
+     * Iteratively generates a full-length script in N ordered chunks. The raw
+     * material (research output + source docs) is split into N sections; each
+     * chunk call writes a small number of short scenes (5-10s each) with the
+     * prior chunks' running summary for narrative coherence. All chunks are
+     * merged into one {@code script_body} array, validated once, and returned
+     * as the single step output JSON. The output never exceeds the model's
+     * per-call token cap because each call writes only a few scenes.
+     */
+    private String generateScriptIteratively(Agent agent, Flow flow, UUID missionId, String contextData,
+                                             ExecutionStep step) throws Exception {
+        StoryTarget target = configuredStoryTarget(agent, missionId);
+        int scenesPerChunk = configScenesPerChunk(agent);
+        double avgSceneSeconds = Math.max(5.0, Math.min(10.0, target.wordsPerScene() / 2.3));
+        int totalScenes = Math.max(1, (int) Math.round(target.targetDurationSeconds() / avgSceneSeconds));
+        int numChunks = Math.max(1, (int) Math.ceil(totalScenes / (double) scenesPerChunk));
+
+        String rawContent = extractResearchContent(contextData, missionId);
+        List<String> chunks = splitContent(rawContent, numChunks);
+
+        Provider primaryProvider = resolveProvider(agent);
+        step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
+        step.setModelUsed(primaryProvider != null ? resolveModel(agent, primaryProvider, resolveLLMProvider(primaryProvider)) : null);
+
+        ArrayNode allScenes = objectMapper.createArrayNode();
+        String title = null;
+        int sceneCounter = 0;
+        StringBuilder runningSummary = new StringBuilder();
+        int totalPrompt = 0;
+        int totalCompletion = 0;
+        long totalLatency = 0L;
+        int maxTokens = resolveMaxTokens(flow, agent, missionId);
+
+        for (int i = 0; i < chunks.size(); i++) {
+            boolean isFirst = i == 0;
+            boolean isLast = i == chunks.size() - 1;
+            int scenesThisChunk = isLast ? Math.max(1, totalScenes - sceneCounter) : scenesPerChunk;
+            if (scenesThisChunk <= 0) scenesThisChunk = 1;
+            final int chunkScenes = scenesThisChunk;
+
+            String chunkSystem = buildChunkSystemPrompt(agent, flow, missionId, target,
+                    chunkScenes, isFirst, isLast, sceneCounter + 1);
+            String chunkUser = buildChunkUserMessage(agent, missionId, chunks.get(i),
+                    runningSummary.toString(), isFirst, isLast, sceneCounter + 1, chunkScenes);
+
+            LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
+                    chunkSystem, chunkUser, missionId, maxTokens,
+                    content -> isChunkOutputValid(content, chunkScenes), true);
+            if (!response.isSuccess()) {
+                throw new RuntimeException("Script chunk " + (i + 1) + "/" + chunks.size()
+                        + " failed: " + response.getErrorMessage());
+            }
+            if (i < chunks.size() - 1) {
+                throttle();
+            }
+            totalPrompt += response.getPromptTokens();
+            totalCompletion += response.getCompletionTokens();
+            totalLatency += response.getLatencyMs();
+
+            JsonNode root = StrictJson.extractLastObject(response.getContent());
+            if (root == null) {
+                throw new RuntimeException("Script chunk " + (i + 1) + " returned no parseable JSON");
+            }
+            if (title == null && root.hasNonNull("title")) {
+                title = root.get("title").asText();
+            }
+            JsonNode body = root.get("script_body");
+            if (body == null || !body.isArray() || body.size() == 0) {
+                throw new RuntimeException("Script chunk " + (i + 1) + " returned an empty script_body");
+            }
+            for (JsonNode scene : body) {
+                ((ObjectNode) scene).put("scene_number", ++sceneCounter);
+                allScenes.add(scene);
+            }
+            appendRunningSummary(runningSummary, body);
+            log.info("Script chunk {}/{} produced {} scenes (total {})",
+                    i + 1, chunks.size(), body.size(), sceneCounter);
+        }
+
+        ObjectNode merged = objectMapper.createObjectNode();
+        merged.put("title", title != null ? title : "Untitled");
+        merged.set("script_body", allScenes);
+        String mergedJson = objectMapper.writeValueAsString(merged);
+
+        step.setPromptTokens(totalPrompt);
+        step.setCompletionTokens(totalCompletion);
+        step.setTotalTokens(totalPrompt + totalCompletion);
+        step.setLatencyMs((int) totalLatency);
+        step.setPromptUsed("iterative script generation across " + chunks.size() + " chunks");
+
+        if (!isOutputValidFor(agent, mergedJson)) {
+            throw new RuntimeException("Merged iterative script failed validation with "
+                    + allScenes.size() + " scenes");
+        }
+        log.info("Iterative script generation complete: {} scenes across {} chunks",
+                allScenes.size(), chunks.size());
+        return mergedJson;
+    }
+
+    private boolean isIterativeScriptMode(Agent agent) {
+        if (agent == null || agent.getConfiguration() == null || agent.getConfiguration().isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode config = objectMapper.readTree(agent.getConfiguration());
+            return config.has("iterative") && config.get("iterative").asBoolean(false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private int configScenesPerChunk(Agent agent) {
+        if (agent == null || agent.getConfiguration() == null || agent.getConfiguration().isBlank()) {
+            return 5;
+        }
+        try {
+            JsonNode config = objectMapper.readTree(agent.getConfiguration());
+            if (config.has("scenesPerChunk") && config.get("scenesPerChunk").isInt()) {
+                int k = config.get("scenesPerChunk").asInt();
+                return Math.max(2, Math.min(10, k));
+            }
+        } catch (Exception e) {
+            // fall through to default
+        }
+        return 5;
+    }
+
+    /**
+     * Pauses between chunked script calls so a burst of sequential LLM requests
+     * stays under the provider's per-minute rate limit. Reads a configurable
+     * delay from settings (video.chunk_delay_ms, default 4000).
+     */
+    private void throttle() {
+        int delayMs = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_CHUNK_DELAY_MS, 4000);
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Extracts the raw content to divide into scenes: the research step's
+     * structured output (sections array) when present, falling back to the raw
+     * context text and any source documents for the mission.
+     */
+    private String extractResearchContent(String contextData, UUID missionId) {
+        StringBuilder sb = new StringBuilder();
+
+        if (contextData != null && !contextData.isBlank()) {
+            JsonNode root = StrictJson.extractLastObject(contextData);
+            if (root != null && root.has("sections") && root.get("sections").isArray()) {
+                for (JsonNode s : root.get("sections")) {
+                    if (s.hasNonNull("heading")) {
+                        sb.append("## ").append(s.get("heading").asText()).append("\n");
+                    }
+                    if (s.hasNonNull("content")) {
+                        sb.append(s.get("content").asText()).append("\n\n");
+                    }
+                }
+            } else if (root != null && root.has("script_body")) {
+                // research somehow returned a script; fall back to context text
+                sb.append(contextData).append("\n");
+            } else {
+                sb.append(contextData).append("\n");
+            }
+        }
+
+        if (missionId != null) {
+            List<SourceDocument> docs = sourceDocumentRepository.findByMissionId(missionId);
+            for (SourceDocument doc : docs) {
+                if (doc.getContent() != null && !doc.getContent().isBlank()) {
+                    sb.append("--- ").append(doc.getFilename()).append(" ---\n");
+                    sb.append(doc.getContent()).append("\n\n");
+                }
+            }
+        }
+
+        if (sb.length() == 0) {
+            return "Provide a complete, factual technical video on the mission topic.";
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Splits text into exactly n ordered chunks by proportional character length,
+     * preferring paragraph boundaries near the target cut point. Even thin content
+     * is split into n chunks so the full scene budget is always produced; the
+     * model elaborates each slice into the requested number of scenes.
+     */
+    private List<String> splitContent(String text, int n) {
+        List<String> chunks = new ArrayList<>();
+        if (text == null || text.isBlank()) {
+            for (int i = 0; i < n; i++) {
+                chunks.add("");
+            }
+            return chunks;
+        }
+        if (n <= 1) {
+            chunks.add(text);
+            return chunks;
+        }
+        int total = text.length();
+        int target = Math.max(1, total / n);
+        int start = 0;
+        for (int i = 0; i < n; i++) {
+            if (i == n - 1) {
+                chunks.add(text.substring(start).trim());
+                break;
+            }
+            int approx = Math.min(start + target, total);
+            int cut = approx;
+            int para = text.indexOf("\n\n", approx);
+            if (para > 0 && para < approx + 400) {
+                cut = para + 2;
+            } else {
+                int nl = text.indexOf('\n', approx);
+                if (nl > 0 && nl < approx + 200) {
+                    cut = nl + 1;
+                }
+            }
+            if (cut <= start) {
+                cut = Math.min(approx, total);
+            }
+            if (cut >= total) {
+                chunks.add(text.substring(start).trim());
+                break;
+            }
+            chunks.add(text.substring(start, cut).trim());
+            start = cut;
+        }
+        while (chunks.size() < n) {
+            chunks.add("");
+        }
+        return chunks;
+    }
+
+    private void appendRunningSummary(StringBuilder runningSummary, JsonNode body) {
+        List<String> labels = new ArrayList<>();
+        for (JsonNode scene : body) {
+            String label = "";
+            JsonNode spec = scene != null && scene.hasNonNull("visual_spec") ? scene.get("visual_spec") : null;
+            if (spec != null && spec.hasNonNull("title")) {
+                label = spec.get("title").asText();
+            }
+            if (label.isBlank() && scene.hasNonNull("speaker_text")) {
+                String st = scene.get("speaker_text").asText();
+                label = st.length() > 90 ? st.substring(0, 90) : st;
+            }
+            labels.add(label.isBlank() ? "(untitled)" : label);
+        }
+        runningSummary.append(String.join(" | ", labels)).append("\n");
+    }
+
+    /**
+     * Light per-chunk validation: parseable JSON with a non-empty script_body of
+     * at most maxScenes scenes, each with speaker_text and a visual_spec that
+     * carries a non-empty components array.
+     */
+    private boolean isChunkOutputValid(String content, int maxScenes) {
+        if (content == null || content.isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode root = StrictJson.extractLastObject(content);
+            if (root == null) {
+                return false;
+            }
+            JsonNode body = root.get("script_body");
+            if (body == null || !body.isArray() || body.size() == 0 || body.size() > maxScenes) {
+                return false;
+            }
+            for (JsonNode scene : body) {
+                JsonNode spec = scene != null && scene.hasNonNull("visual_spec")
+                        ? scene.get("visual_spec") : (scene != null ? scene.get("diagram_spec") : null);
+                if (spec == null || !spec.isObject()) {
+                    return false;
+                }
+                JsonNode comps = spec.has("components") ? spec.get("components") : spec.get("shapes");
+                if (comps == null || !comps.isArray() || comps.size() == 0) {
+                    return false;
+                }
+                if (!scene.hasNonNull("speaker_text") || scene.get("speaker_text").asText().isBlank()) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String buildChunkSystemPrompt(Agent agent, Flow flow, UUID missionId, StoryTarget target,
+                                          int scenesThisChunk, boolean isFirst, boolean isLast,
+                                          int startSceneNumber) {
+        StringBuilder sb = new StringBuilder();
+        appendPromptBase(sb, agent, flow, missionId);
+        sb.append("\n\nOUTPUT FORMAT REQUIREMENT (MANDATORY):\n")
+          .append("You are writing ONE CHUNK of a larger video script. Respond with a single valid JSON object ")
+          .append("(no markdown fences, no preamble, no commentary). The JSON schema, per-scene visual spec, allowed layouts, ")
+          .append("themes, and component vocabulary are defined by the behavioral contract of your assigned skill ")
+          .append("(\"Video Script Generator\"). Every scene MUST carry the skill's per-scene visual_spec object with a ")
+          .append("non-empty components array; each component needs a unique \"id\".\n")
+          .append("This chunk covers scenes ").append(startSceneNumber).append(" to ")
+          .append(startSceneNumber + scenesThisChunk - 1).append(" of the full script. Write EXACTLY ")
+          .append(scenesThisChunk).append(" scenes. ")
+          .append(isFirst
+                ? "This is the OPENING chunk: scene " + startSceneNumber + " MUST be the hook that poses a concrete problem in 5-10 seconds. "
+                : "")
+          .append(isLast
+                ? "This is the FINAL chunk: end with a strong summary that counts what was solved (e.g. TODAY WE SOLVED 5 PROBLEMS: 01 ... 02 ...) and a call to action. "
+                : "")
+          .append("Each speaker_text must be SHORT: 1-2 sentences of about 12-20 words (spoken in 5-10 seconds). ")
+          .append("Use the raw content below as your material; do not invent facts that contradict it. ")
+          .append("STRICT CONTENT SAFETY RULES: family-friendly, age-appropriate. ABSOLUTELY FORBIDDEN: violence, fighting, ")
+          .append("war, weapons, guns, blood, gore, injury, death, killing, fear, horror, nudity, adult/sexual content, ")
+          .append("drugs, alcohol, smoking, or anything inappropriate.\n")
+          .append("REPEAT: Output ONLY the raw JSON object with the requested ").append(scenesThisChunk)
+          .append(" scenes. No markdown, no prose outside the JSON.");
+        return sb.toString();
+    }
+
+    private String buildChunkUserMessage(Agent agent, UUID missionId, String chunkContent, String runningSummary,
+                                         boolean isFirst, boolean isLast, int startSceneNumber, int scenesThisChunk) {
+        StringBuilder sb = new StringBuilder();
+        Mission mission = missionId != null ? missionRepository.findById(missionId).orElse(null) : null;
+        if (mission != null) {
+            sb.append("Mission topic: ").append(mission.getName() != null ? mission.getName() : "Untitled").append("\n");
+            if (mission.getDescription() != null && !mission.getDescription().isBlank()) {
+                sb.append("Mission brief: ").append(mission.getDescription()).append("\n");
+            }
+        }
+        sb.append("\nYou must write scenes ").append(startSceneNumber).append(" to ")
+          .append(startSceneNumber + scenesThisChunk - 1).append(" (exactly ").append(scenesThisChunk)
+          .append(" short scenes).\n");
+        if (runningSummary != null && !runningSummary.isBlank()) {
+            sb.append("\nScenes already written (keep continuity):\n").append(runningSummary).append("\n");
+        }
+        sb.append("\nRaw content for THIS chunk:\n").append(chunkContent).append("\n");
+        return sb.toString();
+    }
+
+    private void appendPromptBase(StringBuilder sb, Agent agent, Flow flow, UUID missionId) {
+        Mission mission = missionId != null ? missionRepository.findById(missionId).orElse(null) : null;
+        if (mission != null) {
+            sb.append("Mission topic: ").append(mission.getName() != null ? mission.getName() : "Untitled").append("\n");
+            if (mission.getDescription() != null && !mission.getDescription().isBlank()) {
+                sb.append("Mission brief: ").append(mission.getDescription()).append("\n");
+            }
+            sb.append("Mission type: ").append(mission.getMissionType() != null ? mission.getMissionType() : "GENERAL").append("\n\n");
+        }
+        sb.append("You are the '").append(agent != null ? agent.getName() : "Unknown Agent")
+          .append("' agent in a Karma OS video automation pipeline.\n");
+        if (flow != null) {
+            sb.append("Current flow: ").append(flow.getName())
+              .append(" (").append(flow.getCategory()).append(")\n");
+        }
+        sb.append("\nRespond with well-structured content. Use Markdown formatting where appropriate.");
+        List<Skill> skills = getAgentSkills(agent != null ? agent.getId() : null);
+        if (!skills.isEmpty()) {
+            sb.append("\n\nBehavioral contract from your assigned skills (MANDATORY, overrides any conflicting instruction above):\n");
+            for (Skill s : skills) {
+                sb.append("\n### Skill: ").append(s.getName()).append("\n");
+                if (s.getContent() != null && !s.getContent().isBlank()) {
+                    sb.append(s.getContent()).append("\n");
+                } else {
+                    sb.append(s.getDescription() != null ? s.getDescription() : "").append("\n");
+                }
+                String rules = s.getValidationRules();
+                if (rules != null && !rules.isBlank() && !"{}".equals(rules.trim())) {
+                    sb.append("Output validation rules: ").append(rules).append("\n");
+                }
+            }
+        }
+        String memoryMode = configuredMemoryMode(agent);
+        if (!"OFF".equalsIgnoreCase(memoryMode)) {
+            UUID ownerId = resolveMissionOwnerId(missionId);
+            if (ownerId != null) {
+                boolean includeAuto = "AUTO".equalsIgnoreCase(memoryMode);
+                String memoryBlock = karmaMemoryService.buildMemoryPromptBlock(ownerId, includeAuto);
+                if (!memoryBlock.isBlank()) {
+                    sb.append("\n\n").append(memoryBlock);
+                }
+            }
+        }
+    }
+
+    /**
      * Runs the LLM call with up to MAX_ATTEMPTS attempts, each time trying the
      * primary provider first and the agent's fallback provider second. The prompt
      * is augmented with a corrective instruction after a failed/empty attempt, so
@@ -178,6 +594,13 @@ public class AgentRuntimeService {
      */
     private LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
                                                     String systemPrompt, String userMessage, UUID missionId, int maxTokens) {
+        return executeWithRetryAndFallback(agent, primaryProvider, step, systemPrompt, userMessage, missionId,
+                maxTokens, content -> isOutputValidFor(agent, content), false);
+    }
+
+    private LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
+                                                    String systemPrompt, String userMessage, UUID missionId, int maxTokens,
+                                                    Predicate<String> validator, boolean chunkMode) {
         final int maxAttempts = 3;
         LLMResponse lastResponse = null;
         String correctiveHint = "";
@@ -219,7 +642,7 @@ public class AgentRuntimeService {
                     lastResponse = LLMResponse.ok(cached.getResponseContent(), modelUsed, 0, 0, 0);
                 } else {
                     lastResponse = llmProvider.chat(request);
-                    if (lastResponse.isSuccess() && isOutputValidFor(agent, lastResponse.getContent())) {
+                    if (lastResponse.isSuccess() && validator.test(lastResponse.getContent())) {
                         LlmCache newCache = new LlmCache();
                         newCache.setHashKey(hashKey);
                         newCache.setModel(modelUsed);
@@ -228,7 +651,7 @@ public class AgentRuntimeService {
                     }
                 }
 
-                if (lastResponse.isSuccess() && isOutputValidFor(agent, lastResponse.getContent())) {
+                if (lastResponse.isSuccess() && validator.test(lastResponse.getContent())) {
                     if (attempt > 1 || provider != primaryProvider) {
                         log.info("Agent {} produced valid output on attempt {}/{} via provider {}",
                                 agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName());
@@ -245,7 +668,7 @@ public class AgentRuntimeService {
                 if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null) {
                     String err = lastResponse.getErrorMessage().toLowerCase();
                     if (err.contains("429") || err.contains("rate limit") || err.contains("too many requests")) {
-                        long sleepTime = (long) (Math.pow(2, attempt) * 1000) + (long) (Math.random() * 1000);
+                        long sleepTime = (long) (Math.pow(2, attempt + 2) * 1000) + (long) (Math.random() * 3000);
                         log.warn("Rate limit hit, applying exponential backoff. Sleeping for {} ms before retry", sleepTime);
                         try {
                             Thread.sleep(sleepTime);
@@ -262,20 +685,37 @@ public class AgentRuntimeService {
 
             if (attempt < maxAttempts) {
                 if (isStoryScriptWriter(agent)) {
-                    correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was rejected because it did NOT "
-                        + "conform to the mandated JSON schema defined in your assigned skill (\"Video Script Generator\"). "
-                        + "Respond with a SINGLE raw JSON object only (no markdown "
-                        + "fences, no ```json, no preamble, no commentary) that has EXACTLY these top-level fields: "
-                        + "{\"title\": \"...\", \"script_body\": [ {\"scene_number\": 1, \"speaker_text\": \"...\", "
-                        + "\"visual_description\": \"...\", \"visual_spec\": { \"theme\": \"codeatcloud\", \"layout\": \"presentation\", "
-                        + "\"title\": \"...\", \"content_blocks\": [ "
-                        + "{\"heading\": \"...\", \"text\": \"...\"} ] } } ] }. "
-                        + "The \"script_body\" MUST be a non-empty JSON array of scene objects; each scene MUST have "
-                        + "\"scene_number\", \"speaker_text\" and a \"visual_spec\" object. Each \"visual_spec\" MUST have either a "
-                        + "\"components\" array OR a \"content_blocks\" array for presentation layouts. "
-                        + "Follow the layouts, themes and component vocabulary from your assigned skill. "
-                        + "Do NOT output a content strategy, outline, plan, or any other JSON shape. Output ONLY the "
-                        + "script_body JSON object.";
+                    if (chunkMode) {
+                        correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was rejected because it did NOT "
+                            + "conform to the mandated chunk JSON schema. Respond with a SINGLE raw JSON object only "
+                            + "(no markdown fences, no ```json, no preamble, no commentary) that has EXACTLY these top-level fields: "
+                            + "{\"title\": \"...\", \"script_body\": [ {\"scene_number\": 1, \"speaker_text\": \"...\", "
+                            + "\"visual_description\": \"...\", \"visual_spec\": { \"theme\": \"codeatcloud\", \"layout\": \"standard-content\", "
+                            + "\"title\": \"...\", \"components\": [ "
+                            + "{\"id\": \"a\", \"type\": \"heading\", \"label\": \"...\"} ] } } ] }. "
+                            + "The \"script_body\" MUST be a non-empty JSON array of scene objects for THIS CHUNK ONLY; each scene MUST have "
+                            + "\"scene_number\", \"speaker_text\" and a \"visual_spec\" object. Each \"visual_spec\" MUST have a non-empty "
+                            + "\"components\" array; every component needs a unique \"id\" and one of the allowed \"type\" values from your skill. "
+                            + "Write only the requested number of scenes for this chunk, numbering them consecutively from the start scene number "
+                            + "provided. Output ONLY the raw JSON object.";
+                    } else {
+                        correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was rejected because it did NOT "
+                            + "conform to the mandated JSON schema defined in your assigned skill (\"Video Script Generator\"). "
+                            + "Respond with a SINGLE raw JSON object only (no markdown "
+                            + "fences, no ```json, no preamble, no commentary) that has EXACTLY these top-level fields: "
+                            + "{\"title\": \"...\", \"script_body\": [ {\"scene_number\": 1, \"speaker_text\": \"...\", "
+                            + "\"visual_description\": \"...\", \"visual_spec\": { \"theme\": \"codeatcloud\", \"layout\": \"standard-content\", "
+                            + "\"title\": \"...\", \"components\": [ "
+                            + "{\"id\": \"a\", \"type\": \"heading\", \"label\": \"...\"} ] } } ] }. "
+                            + "The \"script_body\" MUST be a non-empty JSON array of scene objects; each scene MUST have "
+                            + "\"scene_number\", \"speaker_text\" and a \"visual_spec\" object. Each \"visual_spec\" MUST have a non-empty "
+                            + "\"components\" array; every component needs a unique \"id\" and one of the allowed \"type\" values from your skill. "
+                            + "Use ONLY the 13 allowed layouts; diagram layouts require a \"connections\" array, code-explainer requires a "
+                            + "\"code\" component, and roadmap-timeline keeps at most 5 steps. "
+                            + "Follow the layouts, themes and component vocabulary from your assigned skill. "
+                            + "Do NOT output a content strategy, outline, plan, or any other JSON shape. Output ONLY the "
+                            + "script_body JSON object.";
+                    }
                 } else {
                     correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was invalid (empty, too short, " +
                         "or it just stated that you lacked source material). Do NOT say you have no context or no " +
@@ -435,6 +875,103 @@ public class AgentRuntimeService {
      * raw JSON object whose top-level "script_body" is a non-empty array, otherwise
      * the response is treated as invalid and the retry loop corrects it.
      */
+    /**
+     * Enforces the video renderer contract on a scene spec:
+     * - layout must be one of the 13 implemented layouts (missing -> allowed, coerced to standard-content downstream)
+     * - every component must use a type from the video vocabulary
+     * - per-layout cardinality/requirement rules
+     */
+    private boolean isSpecCompliant(JsonNode spec) {
+        JsonNode layoutNode = spec.get("layout");
+        String layout = "";
+        if (layoutNode != null && layoutNode.isTextual()) {
+            layout = layoutNode.asText();
+            if (!ALLOWED_LAYOUTS.contains(layout)) {
+                log.info("Script output rejected: layout \"{}\" is not implemented by the video renderer", layout);
+                return false;
+            }
+        }
+        JsonNode comps = spec.get("components");
+        if (comps == null || !comps.isArray()) {
+            return false;
+        }
+        for (JsonNode comp : comps) {
+            if (!comp.isObject()) {
+                return false;
+            }
+            String type = comp.hasNonNull("type") ? comp.get("type").asText() : null;
+            if (type == null || !ALLOWED_COMPONENT_TYPES.contains(type)) {
+                log.info("Script output rejected: unknown component type \"{}\"", type);
+                return false;
+            }
+        }
+        int n = comps.size();
+        switch (layout) {
+            case "code-explainer": {
+                boolean hasCode = false;
+                for (JsonNode comp : comps) {
+                    if ("code".equals(comp.path("type").asText())) {
+                        hasCode = true;
+                        break;
+                    }
+                }
+                if (!hasCode) {
+                    log.info("Script output rejected: code-explainer requires a \"code\" component");
+                    return false;
+                }
+                break;
+            }
+            case "architecture-diagram": {
+                JsonNode conns = spec.get("connections");
+                if (conns == null || !conns.isArray() || conns.size() == 0) {
+                    log.info("Script output rejected: architecture-diagram requires a non-empty \"connections\" array");
+                    return false;
+                }
+                break;
+            }
+            case "roadmap-timeline":
+                if (n > 5) {
+                    log.info("Script output rejected: roadmap-timeline exceeds 5 steps");
+                    return false;
+                }
+                break;
+            case "feature-grid":
+                if (n > 8) {
+                    log.info("Script output rejected: feature-grid exceeds 8 components");
+                    return false;
+                }
+                break;
+            case "big-number":
+                if (n > 4) {
+                    log.info("Script output rejected: big-number exceeds 4 components");
+                    return false;
+                }
+                break;
+            case "terminal-walkthrough":
+                if (n > 10) {
+                    log.info("Script output rejected: terminal-walkthrough exceeds 10 commands");
+                    return false;
+                }
+                break;
+            case "bento":
+            case "dashboard":
+                if (n > 12) {
+                    log.info("Script output rejected: {} exceeds 12 components", layout);
+                    return false;
+                }
+                break;
+            case "infographic":
+                if (n > 16) {
+                    log.info("Script output rejected: infographic exceeds 16 components");
+                    return false;
+                }
+                break;
+            default:
+                break;
+        }
+        return true;
+    }
+
     private boolean isOutputValidFor(Agent agent, String content) {
         if (!StepContextDistiller.isValidOutput(content)) {
             return false;
@@ -450,10 +987,9 @@ public class AgentRuntimeService {
                     return false;
                 }
                 StoryTarget target = configuredStoryTarget(agent, null);
-                int minScenes = Math.max(1, target.minScenes());
-                if (body.size() < minScenes) {
-                    log.info("Script output rejected: {} scenes found, minimum required is {}",
-                            body.size(), minScenes);
+                int softFloor = Math.max(1, Math.min(5, target.minScenes()));
+                if (body.size() < softFloor) {
+                    log.info("Script output rejected: {} scenes found, soft floor is {}", body.size(), softFloor);
                     return false;
                 }
                 for (JsonNode scene : body) {
@@ -465,7 +1001,7 @@ public class AgentRuntimeService {
                     }
                     JsonNode shapes = spec.has("components") ? spec.get("components") : spec.get("shapes");
                     JsonNode blocks = spec.get("content_blocks");
-                    
+
                     if ((shapes == null || !shapes.isArray() || shapes.size() == 0) &&
                         (blocks == null || !blocks.isArray() || blocks.size() == 0)) {
                         return false;
@@ -483,6 +1019,9 @@ public class AgentRuntimeService {
                                 return false;
                             }
                         }
+                    }
+                    if (shapes != null && shapes.isArray() && shapes.size() > 0 && !isSpecCompliant(spec)) {
+                        return false;
                     }
                 }
                 return true;

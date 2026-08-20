@@ -3,6 +3,7 @@ package com.karmaos.media;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.karmaos.sse.SseController;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,6 +15,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Renders a narration-synced MP4 via the karma-renderer Remotion engine
@@ -31,15 +36,25 @@ public class RemotionVideoProvider implements VideoProvider {
     private final String rendererUrl;
     private final Path outputDir;
     private final ObjectMapper objectMapper;
+    private final SseController sseController;
 
     public RemotionVideoProvider(String rendererUrl, ObjectMapper objectMapper) {
-        this(rendererUrl, DEFAULT_DIR, objectMapper);
+        this(rendererUrl, DEFAULT_DIR, objectMapper, null);
     }
 
     public RemotionVideoProvider(String rendererUrl, Path outputDir, ObjectMapper objectMapper) {
+        this(rendererUrl, outputDir, objectMapper, null);
+    }
+
+    public RemotionVideoProvider(String rendererUrl, ObjectMapper objectMapper, SseController sseController) {
+        this(rendererUrl, DEFAULT_DIR, objectMapper, sseController);
+    }
+
+    public RemotionVideoProvider(String rendererUrl, Path outputDir, ObjectMapper objectMapper, SseController sseController) {
         this.rendererUrl = rendererUrl != null && !rendererUrl.isBlank() ? rendererUrl : DEFAULT_URL;
         this.outputDir = outputDir != null ? outputDir : DEFAULT_DIR;
         this.objectMapper = objectMapper;
+        this.sseController = sseController;
     }
 
     @Override
@@ -54,6 +69,7 @@ public class RemotionVideoProvider implements VideoProvider {
     @Override
     public VideoResponse generate(VideoRequest request) {
         long start = System.currentTimeMillis();
+        ScheduledExecutorService poller = startProgressPoller();
         try {
             Files.createDirectories(outputDir);
             ObjectNode body = buildPayload(request);
@@ -69,6 +85,52 @@ public class RemotionVideoProvider implements VideoProvider {
         } catch (Exception e) {
             log.error("Remotion video render failed", e);
             return VideoResponse.error("Remotion video render failed: " + e.getMessage());
+        } finally {
+            if (poller != null) {
+                poller.shutdownNow();
+            }
+        }
+    }
+
+    /** Polls the renderer's /video/progress endpoint while the (blocking) render runs and
+     *  relays frame-level progress to all SSE subscribers as `video.render.progress` events. */
+    private ScheduledExecutorService startProgressPoller() {
+        if (sseController == null) return null;
+        ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "video-render-progress");
+            t.setDaemon(true);
+            return t;
+        });
+        AtomicReference<String> last = new AtomicReference<>("");
+        poller.scheduleAtFixedRate(() -> {
+            try {
+                String json = fetchProgress();
+                if (json != null && !json.isBlank() && !json.equals(last.get())) {
+                    last.set(json);
+                    sseController.sendEvent("video.render.progress", json);
+                }
+            } catch (Exception ignored) {
+                // a failed poll is non-fatal; the next tick retries
+            }
+        }, 3, 3, TimeUnit.SECONDS);
+        return poller;
+    }
+
+    private String fetchProgress() {
+        try {
+            HttpURLConnection conn = (HttpURLConnection)
+                    new URI(rendererUrl.replaceAll("/+$", "") + "/video/progress").toURL().openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(3000);
+            int code = conn.getResponseCode();
+            if (code != 200) return null;
+            try (var is = conn.getInputStream()) {
+                return readBody(is, 2048);
+            }
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -84,6 +146,16 @@ public class RemotionVideoProvider implements VideoProvider {
         resolution.put("height", Integer.parseInt(res[1]));
         body.set("resolution", resolution);
         body.put("transitionDuration", Math.max(0, transitionFrames));
+        String sceneMotion = request.getSceneMotion();
+        if (sceneMotion != null && !sceneMotion.isBlank()) {
+            body.put("sceneMotion", "static".equalsIgnoreCase(sceneMotion) ? "static" : "animated");
+        }
+        if (request.getTransition() != null && !request.getTransition().isBlank()) {
+            body.put("transition", request.getTransition());
+        }
+        if (request.getBackgroundPattern() != null && !request.getBackgroundPattern().isBlank()) {
+            body.put("backgroundPattern", request.getBackgroundPattern());
+        }
         body.put("enableIntro", true);
         if (request.getIntroTitle() != null && !request.getIntroTitle().isBlank()) {
             body.put("introTitle", request.getIntroTitle());
@@ -123,13 +195,19 @@ public class RemotionVideoProvider implements VideoProvider {
 
         ArrayNode scenes = objectMapper.createArrayNode();
         List<VideoScene> sceneList = request.getScenes() != null ? request.getScenes() : List.of();
-        for (VideoScene scene : sceneList) {
+        List<String> sceneTransitions = request.getSceneTransitions() != null ? request.getSceneTransitions() : List.of();
+        for (int si = 0; si < sceneList.size(); si++) {
+            VideoScene scene = sceneList.get(si);
             ObjectNode sceneNode = objectMapper.createObjectNode();
+            if (si < sceneTransitions.size() && sceneTransitions.get(si) != null && !sceneTransitions.get(si).isBlank()) {
+                sceneNode.put("transition", sceneTransitions.get(si));
+            }
             ObjectNode visualSpec = parseSpec(scene.getSpec());
             if (visualSpec == null && scene.getImageUrl() != null && !scene.getImageUrl().isBlank()) {
                 visualSpec = fallbackSpecFromImage(scene.getImageUrl());
             }
             if (visualSpec != null) {
+                VisualSpecNormalizer.normalize(visualSpec, objectMapper);
                 BrandingSupport.applyBranding(visualSpec, objectMapper);
                 sceneNode.set("visualSpec", visualSpec);
             } else {
@@ -199,7 +277,7 @@ public class RemotionVideoProvider implements VideoProvider {
 
     private ObjectNode emptySpec() {
         ObjectNode spec = objectMapper.createObjectNode();
-        spec.put("layout", "cards");
+        spec.put("layout", "standard-content");
         spec.put("theme", "whiteboard");
         spec.set("components", objectMapper.createArrayNode());
         spec.set("connections", objectMapper.createArrayNode());
@@ -241,7 +319,7 @@ public class RemotionVideoProvider implements VideoProvider {
         conn.setRequestProperty("Accept", "video/mp4");
         conn.setDoOutput(true);
         conn.setConnectTimeout(5000);
-        conn.setReadTimeout(3600000);
+        conn.setReadTimeout(14400000);
         try (OutputStream os = conn.getOutputStream()) {
             os.write(objectMapper.writeValueAsBytes(body));
         }

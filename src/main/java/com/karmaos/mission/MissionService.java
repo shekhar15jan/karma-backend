@@ -39,6 +39,8 @@ public class MissionService {
     private static final Set<String> ALLOWED_MISSION_TYPES =
             Set.of("VIDEO", "BLOG", "SCRIPT", "VOICE", "THUMBNAIL", "WORKFLOW");
     private static final Set<String> ALLOWED_PRIORITIES = Set.of("LOW", "MEDIUM", "HIGH", "URGENT");
+    private static final Set<String> ALLOWED_THEMES =
+            Set.of("whiteboard", "corporate", "minimal", "dark", "glass", "technical", "codeatcloud", "auto");
 
     public MissionService(MissionRepository missionRepository,
                           MissionFlowRepository missionFlowRepository,
@@ -84,6 +86,7 @@ ExecutionRepository executionRepository,
         mission.setProviderId(request.getProviderId());
         mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
         mission.setTargetDurationSeconds(normalizeDuration(request.getTargetDurationSeconds()));
+        mission.setTheme(normalizeTheme(request.getTheme()));
         mission.setStatus("DRAFT");
         mission.setProgress(0);
         mission = missionRepository.save(mission);
@@ -130,6 +133,17 @@ ExecutionRepository executionRepository,
             return null;
         }
         return Math.max(30, targetDurationSeconds);
+    }
+
+    private String normalizeTheme(String theme) {
+        if (theme == null || theme.isBlank()) {
+            return "whiteboard";
+        }
+        String t = theme.trim().toLowerCase();
+        if (!ALLOWED_THEMES.contains(t)) {
+            throw ErrorCode.BAD_REQUEST.exception("Unsupported theme: " + theme);
+        }
+        return t;
     }
 
     private void linkFlowsToMission(Mission mission, MissionRequest request) {
@@ -180,6 +194,9 @@ ExecutionRepository executionRepository,
         mission.setProviderId(request.getProviderId());
         mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
         mission.setTargetDurationSeconds(normalizeDuration(request.getTargetDurationSeconds()));
+        if (request.getTheme() != null && !request.getTheme().isBlank()) {
+            mission.setTheme(normalizeTheme(request.getTheme()));
+        }
         mission = missionRepository.save(mission);
         relinkFlowsToMission(mission, request);
         return toResponse(mission);
@@ -239,6 +256,7 @@ ExecutionRepository executionRepository,
                 .progress(m.getProgress())
                 .outputDirectory(m.getOutputDirectory())
                 .targetDurationSeconds(m.getTargetDurationSeconds())
+                .theme(m.getTheme())
                 .startedAt(m.getStartedAt())
                 .completedAt(m.getCompletedAt())
                 .createdAt(m.getCreatedAt())

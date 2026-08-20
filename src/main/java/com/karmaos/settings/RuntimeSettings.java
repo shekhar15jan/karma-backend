@@ -24,6 +24,9 @@ public class RuntimeSettings {
     public static final String KEY_VIDEO_MIN_SCENES = "video.min_scenes";
     public static final String KEY_VIDEO_MAX_SCENES = "video.max_scenes";
     public static final String KEY_VIDEO_WORDS_PER_SCENE = "video.words_per_scene";
+    public static final String KEY_VIDEO_RESOLUTION = "video.resolution";
+    public static final String KEY_VIDEO_SCENE_MOTION = "video.scene_motion";
+    public static final String KEY_VIDEO_CHUNK_DELAY_MS = "video.chunk_delay_ms";
 
     private final SettingsRepository settingsRepository;
     private final ObjectMapper objectMapper;
@@ -60,6 +63,17 @@ public class RuntimeSettings {
             if ("false".equalsIgnoreCase(str.trim())) {
                 return false;
             }
+        }
+        return defaultValue;
+    }
+
+    public String getString(String key, String defaultValue) {
+        Object value = global().get(key);
+        if (value instanceof String str && !str.isBlank()) {
+            return str.trim();
+        }
+        if (value != null) {
+            return String.valueOf(value).trim();
         }
         return defaultValue;
     }

@@ -7,6 +7,8 @@ import com.karmaos.agent.AgentRepository;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.artifact.ArtifactStorageService;
+import com.karmaos.execution.Execution;
+import com.karmaos.execution.ExecutionRepository;
 import com.karmaos.execution.ExecutionStep;
 import com.karmaos.execution.ExecutionService;
 import com.karmaos.execution.ExecutionStepRepository;
@@ -46,6 +48,11 @@ public class MediaOrchestrationService {
         "audio_generation", "edge-tts",
         "music_generation", "google-music"
     );
+    private static final List<String> ROTATION_THEMES = List.of(
+        "whiteboard", "corporate", "minimal", "dark", "glass", "technical", "codeatcloud");
+    private static final List<String> ROTATION_TRANSITIONS = List.of(
+        "fade", "slide-left", "slide-right", "wipe-left", "wipe-right", "zoom");
+    private static final List<String> BACKGROUND_PATTERNS = List.of("grid", "dots", "plain");
 
     private final ImageProviderFactory imageProviderFactory;
     private final VoiceProviderFactory voiceProviderFactory;
@@ -62,13 +69,8 @@ public class MediaOrchestrationService {
     private final ObjectMapper objectMapper;
     private final MissionRepository missionRepository;
     private final ExecutionStepRepository executionStepRepository;
+    private final ExecutionRepository executionRepository;
     private final AgentSkillRepository agentSkillRepository;
-
-    @Value("${RENDERER_URL:}")
-    private String visualRendererUrl;
-
-    @Value("${media.visual-only:true}")
-    private boolean visualOnly;
 
     public MediaOrchestrationService(ImageProviderFactory imageProviderFactory,
                                       VoiceProviderFactory voiceProviderFactory,
@@ -85,6 +87,7 @@ public class MediaOrchestrationService {
                                       ObjectMapper objectMapper,
                                       MissionRepository missionRepository,
                                       ExecutionStepRepository executionStepRepository,
+                                      ExecutionRepository executionRepository,
                                       AgentSkillRepository agentSkillRepository) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
@@ -101,6 +104,7 @@ public class MediaOrchestrationService {
         this.objectMapper = objectMapper;
         this.missionRepository = missionRepository;
         this.executionStepRepository = executionStepRepository;
+        this.executionRepository = executionRepository;
         this.agentSkillRepository = agentSkillRepository;
     }
 
@@ -110,17 +114,6 @@ public class MediaOrchestrationService {
 
         try {
             requireAgentSkill(agentId);
-            List<String> diagramSpecs = extractDiagramSpecs(contextData);
-            if (!diagramSpecs.isEmpty()) {
-                return runDiagramStep(executionId, flowId, agentId, stepOrder, contextData, missionId, step, diagramSpecs);
-            }
-
-            if (visualOnly) {
-                step.setStatus("FAILED");
-                step.setErrorMessage("Visual-only mode: script provides no per-scene visual_spec/diagram_spec; every scene image must be rendered via the HTML/CSS Visual Engine");
-                step.setCompletedAt(LocalDateTime.now());
-                return executionService.saveStep(executionId, step);
-            }
 
             Provider primaryProvider = resolveMissionPreferredImageProvider(missionId);
             if (primaryProvider == null) {
@@ -177,7 +170,7 @@ public class MediaOrchestrationService {
                 String sceneUrl = tryGenerateScene(primaryImageProvider, fallbackProvider, safePrompt, i, missionSeed);
                 if (sceneUrl != null) {
                     allUrls.add(sceneUrl);
-                    persistImageArtifact(missionId, sceneUrl, i);
+                    persistImageArtifact(missionId, sceneUrl, i, artifactReviewStatus(executionId));
                 } else {
                     failures.add("scene " + i + ": all providers failed");
                 }
@@ -270,7 +263,13 @@ public class MediaOrchestrationService {
         return "image/png";
     }
 
-    private void persistImageArtifact(UUID missionId, String url, int sceneIndex) {
+    private String artifactReviewStatus(UUID executionId) {
+        return executionRepository.findById(executionId)
+                .map(e -> "AUTO".equalsIgnoreCase(e.getMode()) ? "APPROVED" : "PENDING")
+                .orElse("PENDING");
+    }
+
+    private void persistImageArtifact(UUID missionId, String url, int sceneIndex, String reviewStatus) {
         Artifact artifact = new Artifact();
         artifact.setMissionId(missionId);
         artifact.setName("Generated Scene Image " + (sceneIndex + 1));
@@ -278,126 +277,12 @@ public class MediaOrchestrationService {
         artifact.setStatus("COMPLETED");
         artifact.setContentText(url);
         artifact.setContentType(resolveImageContentType(url));
-        artifact.setReviewStatus("PENDING");
+        artifact.setReviewStatus(reviewStatus);
         artifact.setPublicationStatus("UNPUBLISHED");
         artifact.setStorageLocation(url);
         artifact.setMetadata("{\"sceneIndex\":" + sceneIndex + "}");
         artifactStorageService.persist(artifact, missionId);
         artifactRepository.save(artifact);
-    }
-
-    /**
-     * Extracts one raw scene spec JSON per scene from the upstream script output.
-     * Accepts the current {@code visual_spec} form, falling back to the legacy
-     * {@code diagram_spec} key. Returns empty list when the context carries no
-     * scene specs (pure diagram missions must have one per scene, otherwise the
-     * image step fails).
-     */
-    private List<String> extractDiagramSpecs(String contextData) {
-        if (contextData == null || contextData.isBlank()) {
-            return List.of();
-        }
-        try {
-            com.fasterxml.jackson.databind.JsonNode root = extractJsonNode(contextData);
-            if (root == null) {
-                return List.of();
-            }
-            com.fasterxml.jackson.databind.JsonNode sections = null;
-            if (root.has("script_body") && root.get("script_body").isArray()) {
-                sections = root.get("script_body");
-            } else if (root.has("scenes") && root.get("scenes").isArray()) {
-                sections = root.get("scenes");
-            }
-            if (sections == null || sections.size() == 0) {
-                return List.of();
-            }
-            List<String> specs = new java.util.ArrayList<>();
-            for (com.fasterxml.jackson.databind.JsonNode section : sections) {
-                if (section.hasNonNull("visual_spec") && section.get("visual_spec").isObject()) {
-                    specs.add(section.get("visual_spec").toString());
-                } else if (section.hasNonNull("diagram_spec") && section.get("diagram_spec").isObject()) {
-                    specs.add(section.get("diagram_spec").toString());
-                }
-            }
-            return specs;
-        } catch (Exception e) {
-            log.warn("Failed to extract diagram specs: {}", e.getMessage());
-            return List.of();
-        }
-    }
-
-    /**
-     * Scene image rendering through the karma-renderer visual engine. The renderer is a
-     * mandatory dependency of diagram missions: if it is not configured, unreachable, or
-     * fails to render ANY scene, the step is FAILED so the execution/mission fails instead
-     * of silently degrading to the local Java2D provider.
-     */
-    private ExecutionStep runDiagramStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
-                                         String contextData, UUID missionId, ExecutionStep step,
-                                         List<String> diagramSpecs) {
-        try {
-            if (visualRendererUrl == null || visualRendererUrl.isBlank()) {
-                step.setStatus("FAILED");
-                step.setErrorMessage("Visual renderer is not configured (RENDERER_URL is blank); cannot render diagram scenes");
-                step.setCompletedAt(java.time.LocalDateTime.now());
-                return executionService.saveStep(executionId, step);
-            }
-            VisualRenderImageProvider visualRenderer = new VisualRenderImageProvider(visualRendererUrl, null, objectMapper);
-            List<String> urls = new java.util.ArrayList<>();
-            List<Map.Entry<Integer, String>> failures = new java.util.ArrayList<>();
-            for (int i = 0; i < diagramSpecs.size(); i++) {
-                String specJson = diagramSpecs.get(i);
-                try {
-                    ObjectNode spec = (ObjectNode) objectMapper.readTree(specJson);
-                    BrandingSupport.applyBranding(spec, objectMapper);
-                    specJson = objectMapper.writeValueAsString(spec);
-                } catch (Exception ignored) {
-                    // non-JSON or malformed spec: pass through unchanged
-                }
-                ImageRequest req = new ImageRequest();
-                req.setPrompt(specJson);
-                req.setN(1);
-                try {
-                    ImageResponse resp = visualRenderer.generate(req);
-                    if (resp.isSuccess() && resp.getImageUrls() != null && !resp.getImageUrls().isEmpty()) {
-                        String url = resp.getImageUrls().get(0);
-                        urls.add(url);
-                        persistImageArtifact(missionId, url, i);
-                    } else {
-                        failures.add(Map.entry(i, "renderer returned error: " + resp.getErrorMessage()));
-                    }
-                } catch (Exception e) {
-                    log.warn("Visual renderer failed for scene {}: {}", i, e.getMessage());
-                    failures.add(Map.entry(i, e.getMessage()));
-                }
-            }
-            if (!failures.isEmpty()) {
-                String detail = failures.stream()
-                        .map(f -> "scene " + f.getKey() + " -> " + f.getValue())
-                        .collect(java.util.stream.Collectors.joining("; "));
-                step.setStatus("FAILED");
-                step.setErrorMessage("Visual renderer failed for " + failures.size() + "/" + diagramSpecs.size()
-                        + " scene(s): " + detail);
-                step.setCompletedAt(java.time.LocalDateTime.now());
-                return executionService.saveStep(executionId, step);
-            }
-            if (urls.isEmpty()) {
-                step.setStatus("FAILED");
-                step.setErrorMessage("Scene rendering produced no images");
-                step.setCompletedAt(java.time.LocalDateTime.now());
-                return executionService.saveStep(executionId, step);
-            }
-            step.setStatus("COMPLETED");
-            step.setOutputData(String.join("\n", urls));
-            step.setCompletedAt(java.time.LocalDateTime.now());
-            return executionService.saveStep(executionId, step);
-        } catch (Exception e) {
-            log.error("Diagram step failed: agentId={}", agentId, e);
-            step.setStatus("FAILED");
-            step.setErrorMessage(e.getMessage());
-            step.setCompletedAt(java.time.LocalDateTime.now());
-            return executionService.saveStep(executionId, step);
-        }
     }
 
     private List<String> buildScenePrompts(String contextData) {
@@ -551,7 +436,7 @@ public class MediaOrchestrationService {
                 if (sceneResponse.isSuccess()) {
                     sceneAudioUrls.add(sceneResponse.getAudioUrl());
                     persistSceneAudioArtifact(missionId, "Scene Narration " + (i + 1), sceneResponse.getAudioUrl(),
-                            sceneResponse.getDurationSeconds(), i);
+                            sceneResponse.getDurationSeconds(), i, artifactReviewStatus(executionId));
                     synthesized++;
                 } else {
                     log.warn("Per-scene narration {} failed: {}", i, sceneResponse.getErrorMessage());
@@ -585,7 +470,7 @@ public class MediaOrchestrationService {
                 artifact.setStatus("COMPLETED");
                 artifact.setContentText(response.getAudioUrl());
                 artifact.setContentType("audio/mpeg");
-                artifact.setReviewStatus("PENDING");
+                artifact.setReviewStatus(artifactReviewStatus(executionId));
                 artifact.setPublicationStatus("UNPUBLISHED");
                 artifact.setStorageLocation(response.getAudioUrl());
                 artifact.setSize(response.getDurationSeconds());
@@ -609,7 +494,7 @@ public class MediaOrchestrationService {
         return executionService.saveStep(executionId, step);
     }
 
-    private void persistSceneAudioArtifact(UUID missionId, String name, String audioUrl, long sizeSeconds, int sceneIndex) {
+    private void persistSceneAudioArtifact(UUID missionId, String name, String audioUrl, long sizeSeconds, int sceneIndex, String reviewStatus) {
         Artifact artifact = new Artifact();
         artifact.setMissionId(missionId);
         artifact.setName(name);
@@ -617,7 +502,7 @@ public class MediaOrchestrationService {
         artifact.setStatus("COMPLETED");
         artifact.setContentText(audioUrl);
         artifact.setContentType("audio/mpeg");
-        artifact.setReviewStatus("PENDING");
+        artifact.setReviewStatus(reviewStatus);
         artifact.setPublicationStatus("UNPUBLISHED");
         artifact.setStorageLocation(audioUrl);
         artifact.setSize(sizeSeconds);
@@ -666,7 +551,7 @@ public class MediaOrchestrationService {
                 artifact.setStatus("COMPLETED");
                 artifact.setContentText(response.getAudioUrl());
                 artifact.setContentType("audio/wav");
-                artifact.setReviewStatus("PENDING");
+                artifact.setReviewStatus(artifactReviewStatus(executionId));
                 artifact.setPublicationStatus("UNPUBLISHED");
                 artifact.setStorageLocation(response.getAudioUrl());
                 artifact.setSize(response.getDurationSeconds());
@@ -742,6 +627,7 @@ public class MediaOrchestrationService {
 
             // Remotion is the only supported video provider
             List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages);
+            applyMissionTheme(scenes, missionId, executionId);
             if (scenes.isEmpty()) {
                 step.setStatus("FAILED");
                 step.setErrorMessage("Remotion video step found no scenes with a visual spec in the script");
@@ -749,11 +635,13 @@ public class MediaOrchestrationService {
                 return executionService.saveStep(executionId, step);
             }
             
-            // Extract timeline_events from context (from Editor Agent)
+            // Extract timeline_events from context (from Editor Agent) as a fallback
+            // for scene 0 only when the script did not provide per-scene events.
             if (contextData != null && contextData.contains("\"timeline_events\"")) {
                 try {
                     com.fasterxml.jackson.databind.JsonNode ctxNode = extractJsonNode(contextData);
-                    if (ctxNode != null && ctxNode.has("timeline_events")) {
+                    if (ctxNode != null && ctxNode.has("timeline_events") && !scenes.isEmpty()
+                            && scenes.get(0).getTimelineEvents() == null) {
                         scenes.get(0).setTimelineEvents(ctxNode.get("timeline_events").toString());
                     }
                 } catch (Exception ignored) {}
@@ -764,6 +652,20 @@ public class MediaOrchestrationService {
             request.setMusicUrl(musicUrl);
             request.setIntroTitle(missionLabel);
             request.setIntroSubtitle(resolveMissionSubtitle(missionId));
+            request.setResolution(runtimeSettings.getString(RuntimeSettings.KEY_VIDEO_RESOLUTION, "1920x1080"));
+            request.setSceneMotion(runtimeSettings.getString(RuntimeSettings.KEY_VIDEO_SCENE_MOTION, "animated"));
+
+            // Per-run visual variety: rotate default transition, per-scene transitions,
+            // and the background pattern from a seed derived from the execution id.
+            int styleSeed = (executionId.hashCode() & Integer.MAX_VALUE);
+            request.setTransition(ROTATION_TRANSITIONS.get(styleSeed % ROTATION_TRANSITIONS.size()));
+            request.setBackgroundPattern(BACKGROUND_PATTERNS.get(styleSeed % BACKGROUND_PATTERNS.size()));
+            java.util.List<String> sceneTransitions = new java.util.ArrayList<>();
+            for (int i = 0; i < scenes.size(); i++) {
+                int t = (styleSeed + i * 3) % ROTATION_TRANSITIONS.size();
+                sceneTransitions.add(ROTATION_TRANSITIONS.get(t));
+            }
+            request.setSceneTransitions(sceneTransitions);
             
             // Captions config (burn-in enabled by default for YouTube-ready output)
             VideoCaptionsConfig captionsConfig = new VideoCaptionsConfig();
@@ -808,7 +710,7 @@ public class MediaOrchestrationService {
                 artifact.setStatus("COMPLETED");
                 artifact.setContentText(response.getVideoUrl());
                 artifact.setContentType("video/mp4");
-                artifact.setReviewStatus("PENDING");
+                artifact.setReviewStatus(artifactReviewStatus(executionId));
                 artifact.setPublicationStatus("UNPUBLISHED");
                 artifact.setStorageLocation(response.getVideoUrl());
                 artifact.setSize(response.getDurationSeconds());
@@ -857,6 +759,47 @@ public class MediaOrchestrationService {
         return n.contains("music") || n.contains("soundtrack") || n.contains("background");
     }
 
+    private String resolveMissionTheme(UUID missionId, UUID executionId) {
+        String theme = resolveMissionTheme(missionId);
+        if (!"auto".equalsIgnoreCase(theme)) {
+            return theme;
+        }
+        if (executionId == null) {
+            return "whiteboard";
+        }
+        int seed = (executionId.hashCode() & Integer.MAX_VALUE);
+        return ROTATION_THEMES.get(seed % ROTATION_THEMES.size());
+    }
+
+    private String resolveMissionTheme(UUID missionId) {
+        if (missionId == null) return "whiteboard";
+        try {
+            Mission mission = missionRepository.findById(missionId).orElse(null);
+            if (mission != null && mission.getTheme() != null && !mission.getTheme().isBlank()) {
+                return mission.getTheme();
+            }
+        } catch (Exception ignored) {}
+        return "whiteboard";
+    }
+
+    /** Forces every scene's visual_spec.theme to the mission theme so the video and
+     *  /render stills honor the mission-level theme regardless of what the script LLM wrote.
+     *  When the mission theme is "auto", a theme is chosen per execution (stable within a
+     *  run, rotating across runs). */
+    private void applyMissionTheme(List<VideoScene> scenes, UUID missionId, UUID executionId) {
+        if (scenes == null || scenes.isEmpty()) return;
+        String theme = resolveMissionTheme(missionId, executionId);
+        ObjectMapper mapper = new ObjectMapper();
+        for (VideoScene scene : scenes) {
+            if (scene.getSpec() == null || scene.getSpec().isBlank()) continue;
+            try {
+                ObjectNode spec = (ObjectNode) mapper.readTree(scene.getSpec());
+                spec.put("theme", theme);
+                scene.setSpec(spec.toString());
+            } catch (Exception ignored) {}
+        }
+    }
+
     /**
      * Builds Remotion scenes from the script: each script_body section supplies its
      * visual_spec (or legacy diagram_spec) and the per-scene narration audio matched by
@@ -873,6 +816,7 @@ public class MediaOrchestrationService {
         List<String> speakerTexts = new java.util.ArrayList<>();
         List<String> ssmlMarkers = new java.util.ArrayList<>();
         List<String> visualCues = new java.util.ArrayList<>();
+        List<String> timelineEvents = new java.util.ArrayList<>();
         try {
             String jsonCandidate = extractJson(script);
             if (jsonCandidate != null) {
@@ -903,6 +847,11 @@ public class MediaOrchestrationService {
                         } else {
                             visualCues.add(null);
                         }
+                        if (section.hasNonNull("timeline_events") && section.get("timeline_events").isArray()) {
+                            timelineEvents.add(section.get("timeline_events").toString());
+                        } else {
+                            timelineEvents.add(null);
+                        }
                     }
                 }
             }
@@ -929,6 +878,9 @@ public class MediaOrchestrationService {
             }
             if (i < visualCues.size() && visualCues.get(i) != null) {
                 scene.setVisualTriggerCues(visualCues.get(i));
+            }
+            if (i < timelineEvents.size() && timelineEvents.get(i) != null) {
+                scene.setTimelineEvents(timelineEvents.get(i));
             }
             
             // Extract captions from script_body section
@@ -1351,6 +1303,7 @@ public class MediaOrchestrationService {
         step.setStatus("RUNNING");
         step.setStartedAt(LocalDateTime.now());
         step.setInputData(contextData);
+        step = executionStepRepository.save(step);
         return step;
     }
 

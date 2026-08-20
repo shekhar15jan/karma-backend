@@ -36,4 +36,7 @@ public class MissionRequest {
     private String outputDirectory;
 
     private Integer targetDurationSeconds;
+
+    @Size(max = 50)
+    private String theme;
 }

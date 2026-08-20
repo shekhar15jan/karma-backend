@@ -9,6 +9,7 @@ import com.karmaos.agent.AgentRuntimeService;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.artifact.ArtifactStorageService;
+import com.karmaos.access.OwnershipService;
 import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.FlowAgent;
@@ -61,6 +62,7 @@ public class ExecutionOrchestrator {
     private final com.karmaos.sse.SseController sseController;
     private final ObjectMapper objectMapper;
     private final com.karmaos.knowledge.EmbeddingService embeddingService;
+    private final OwnershipService ownershipService;
 
     private final Map<UUID, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -81,7 +83,8 @@ public class ExecutionOrchestrator {
                                  PublishingService publishingService,
                                  com.karmaos.sse.SseController sseController,
                                  ObjectMapper objectMapper,
-                                 com.karmaos.knowledge.EmbeddingService embeddingService) {
+                                 com.karmaos.knowledge.EmbeddingService embeddingService,
+                                 OwnershipService ownershipService) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
@@ -99,6 +102,7 @@ public class ExecutionOrchestrator {
         this.sseController = sseController;
         this.objectMapper = objectMapper;
         this.embeddingService = embeddingService;
+        this.ownershipService = ownershipService;
     }
 
     @Transactional
@@ -383,6 +387,9 @@ public class ExecutionOrchestrator {
             for (int i = startIndex; i < holder.steps.size(); i++) {
                 StepPlan sp = holder.steps.get(i);
                 String context = contextFor(previousOutput, sp, nodeOutputs);
+                if ("LLM".equals(sp.kind)) {
+                    context = (context == null ? "" : context) + "\n\n" + runDirective(execution, sp, i);
+                }
                 ExecutionStep step = runStep(executionId, sp, i, context, null, missionId);
 
                 if (!"COMPLETED".equals(step.getStatus())) {
@@ -650,6 +657,23 @@ public class ExecutionOrchestrator {
         return context.length() > 0 ? context.toString() : fallback;
     }
 
+    /** Per-run creative directive appended to LLM-step context. Deterministic for a
+     *  given execution (retries within one run stay stable) but unique across runs,
+     *  which busts the LLM response cache and yields fresh content every run. */
+    private String runDirective(Execution execution, StepPlan sp, int stepIndex) {
+        UUID execId = execution.getId();
+        int seed = (execId.hashCode() & Integer.MAX_VALUE);
+        int runNumber = (seed % 997) + 1;
+        StringBuilder sb = new StringBuilder();
+        sb.append("[RUN DIRECTIVE #").append(runNumber).append("]\n");
+        sb.append("This is a fresh take for run ").append(runNumber)
+          .append(" (execution ").append(execId).append("). Vary this output from any previous version of the same mission: ");
+        sb.append("choose a different angle, hook, examples, analogies and ordering where possible. ");
+        sb.append("For visual video specs, avoid using the same \"layout\" more than twice in a row and prefer variety across the allowed layouts. ");
+        sb.append("Keep facts accurate and follow the mandated output contract exactly.");
+        return sb.toString();
+    }
+
     private void createArtifactsFromOutput(Execution execution, List<MissionFlow> missionFlows,
                                            Set<UUID> mediaFlows) {
         UUID missionId = execution.getMissionId();
@@ -686,7 +710,7 @@ public class ExecutionOrchestrator {
             artifact.setStatus("COMPLETED");
             artifact.setContentText(flowOutput);
             artifact.setContentType("text/markdown");
-            artifact.setReviewStatus("PENDING");
+            artifact.setReviewStatus("AUTO".equalsIgnoreCase(execution.getMode()) ? "APPROVED" : "PENDING");
             artifact.setPublicationStatus("UNPUBLISHED");
             artifactStorageService.persist(artifact, missionId);
             artifactRepository.save(artifact);
@@ -772,15 +796,25 @@ public class ExecutionOrchestrator {
 
     private void emitExecutionEvent(UUID executionId, String eventType, String data) {
         try {
-            sseController.sendEvent(eventType, data);
+            Execution execution = executionRepository.findById(executionId).orElse(null);
+            if (execution == null || execution.getMissionId() == null) {
+                return;
+            }
+            UUID ownerId = ownershipService.resolveMissionOwnerId(execution.getMissionId());
+            sseController.sendEvent(ownerId, eventType, data);
         } catch (Exception e) {
             log.debug("SSE emit failed for {} {}: {}", eventType, executionId, e.getMessage());
         }
     }
 
     private void emitMissionEvent(UUID missionId, String status) {
-        emitExecutionEvent(missionId, "mission." + status.toLowerCase(),
-            "{\"missionId\":\"" + missionId + "\",\"status\":\"" + status + "\"}");
+        try {
+            UUID ownerId = ownershipService.resolveMissionOwnerId(missionId);
+            sseController.sendEvent(ownerId, "mission." + status.toLowerCase(),
+                "{\"missionId\":\"" + missionId + "\",\"status\":\"" + status + "\"}");
+        } catch (Exception e) {
+            log.debug("SSE mission event emit failed for {} {}: {}", missionId, status, e.getMessage());
+        }
     }
 
     private void updateMissionProgress(UUID missionId, int progress) {

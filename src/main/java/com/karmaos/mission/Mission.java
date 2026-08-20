@@ -57,4 +57,7 @@ public class Mission extends BaseEntity {
 
     @Column(name = "target_duration_seconds")
     private Integer targetDurationSeconds;
+
+    @Column(nullable = false, length = 50)
+    private String theme = "whiteboard";
 }

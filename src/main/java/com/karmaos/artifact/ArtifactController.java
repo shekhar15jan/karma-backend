@@ -98,4 +98,38 @@ public class ArtifactController {
             @AuthenticationPrincipal UserPrincipal user) {
         return ResponseEntity.ok(ApiResponse.ok(artifactService.updateReviewStatus(id, status, user)));
     }
+
+    @GetMapping("/stream")
+    public ResponseEntity<org.springframework.core.io.Resource> streamFile(
+            @RequestParam String path,
+            @AuthenticationPrincipal UserPrincipal user) {
+        try {
+            String hostRoot = artifactStorageService.getHostRoot();
+            String containerRoot = artifactStorageService.getStorageRoot();
+            String normalizedPath = path.replace("\\", "/");
+            String normalizedHostRoot = hostRoot.replace("\\", "/");
+            if (normalizedPath.startsWith(normalizedHostRoot)) {
+                normalizedPath = normalizedPath.replace(normalizedHostRoot, containerRoot.replace("\\", "/"));
+            }
+            
+            java.io.File file = new java.io.File(normalizedPath);
+            if (!file.exists() || !file.isFile()) {
+                return ResponseEntity.notFound().build();
+            }
+            org.springframework.core.io.FileSystemResource resource = new org.springframework.core.io.FileSystemResource(file);
+            MediaType mediaType;
+            try {
+                String mimeType = java.nio.file.Files.probeContentType(file.toPath());
+                mediaType = mimeType != null ? MediaType.parseMediaType(mimeType) : MediaType.APPLICATION_OCTET_STREAM;
+            } catch (Exception e) {
+                mediaType = MediaType.APPLICATION_OCTET_STREAM;
+            }
+            return ResponseEntity.ok()
+                    .contentType(mediaType)
+                    .contentLength(resource.contentLength())
+                    .body(resource);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().build();
+        }
+    }
 }

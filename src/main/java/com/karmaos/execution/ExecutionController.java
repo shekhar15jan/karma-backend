@@ -87,7 +87,7 @@ public class ExecutionController {
     @PostMapping("/trigger/{missionId}")
     public ResponseEntity<ApiResponse<Map<String, Object>>> trigger(
             @PathVariable UUID missionId,
-            @RequestParam(defaultValue = "REVIEW") String mode,
+            @RequestParam(defaultValue = "AUTO") String mode,
             @AuthenticationPrincipal UserPrincipal user) {
         ownershipService.getOwnedMission(user.getId(), missionId);
         Execution execution = orchestrator.startExecutionAfterCommit(missionId, mode);
