@@ -7,6 +7,9 @@ import com.karmaos.common.ErrorCode;
 import com.karmaos.junction.AgentSkill;
 import com.karmaos.junction.AgentSkillId;
 import com.karmaos.junction.AgentSkillRepository;
+import com.karmaos.mcp.McpServer;
+import com.karmaos.mcp.McpServerRepository;
+import com.karmaos.agent.AgentMcpServerRepository;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderRepository;
 import com.karmaos.skill.Skill;
@@ -23,26 +26,19 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import lombok.RequiredArgsConstructor;
+
 @Service
+@RequiredArgsConstructor
 public class AgentService {
 
     private final AgentRepository agentRepository;
     private final ProviderRepository providerRepository;
     private final AgentSkillRepository agentSkillRepository;
     private final SkillRepository skillRepository;
+    private final McpServerRepository mcpServerRepository;
+    private final AgentMcpServerRepository agentMcpServerRepository;
     private final ObjectMapper objectMapper;
-
-    public AgentService(AgentRepository agentRepository,
-                        ProviderRepository providerRepository,
-                        AgentSkillRepository agentSkillRepository,
-                        SkillRepository skillRepository,
-                        ObjectMapper objectMapper) {
-        this.agentRepository = agentRepository;
-        this.providerRepository = providerRepository;
-        this.agentSkillRepository = agentSkillRepository;
-        this.skillRepository = skillRepository;
-        this.objectMapper = objectMapper;
-    }
 
     public List<AgentResponse> list() {
         return agentRepository.findByStatusNot("DELETED")
@@ -70,6 +66,7 @@ public class AgentService {
         agent.setConfiguration(buildConfiguration(request));
         agent = agentRepository.save(agent);
         syncSkills(agent.getId(), request.getSkillIds());
+        syncMcpServers(agent.getId(), request.getMcpServerIds());
         return toResponse(agent);
     }
 
@@ -87,6 +84,7 @@ public class AgentService {
         agent.setConfiguration(buildConfiguration(request));
         agent = agentRepository.save(agent);
         syncSkills(agent.getId(), request.getSkillIds());
+        syncMcpServers(agent.getId(), request.getMcpServerIds());
         return toResponse(agent);
     }
 
@@ -185,6 +183,39 @@ public class AgentService {
         }
     }
 
+    private void syncMcpServers(UUID agentId, List<UUID> mcpServerIds) {
+        if (mcpServerIds == null) {
+            return;
+        }
+        Set<UUID> target = new HashSet<>();
+        if (!mcpServerIds.isEmpty()) {
+            for (UUID mcpId : mcpServerIds) {
+                if (mcpId == null) continue;
+                mcpServerRepository.findById(mcpId).ifPresent(s -> {
+                    if ("ACTIVE".equals(s.getStatus())) {
+                        target.add(mcpId);
+                    }
+                });
+            }
+        }
+        List<AgentMcpServer> existing = agentMcpServerRepository.findByIdAgentId(agentId);
+        for (AgentMcpServer link : existing) {
+            if (!target.contains(link.getId().getMcpServerId())) {
+                agentMcpServerRepository.delete(link);
+            }
+        }
+        Set<UUID> existingIds = existing.stream()
+                .map(s -> s.getId().getMcpServerId())
+                .collect(Collectors.toSet());
+        for (UUID mcpId : target) {
+            if (!existingIds.contains(mcpId)) {
+                AgentMcpServer link = new AgentMcpServer();
+                link.setId(new AgentMcpServerId(agentId, mcpId));
+                agentMcpServerRepository.save(link);
+            }
+        }
+    }
+
     private void validateProviders(AgentRequest request) {
         validateProvider(request.getDefaultProviderId());
         validateProvider(request.getFallbackProviderId());
@@ -215,6 +246,16 @@ public class AgentService {
                         .build())
                 .collect(Collectors.toList());
 
+        List<AgentResponse.AgentMcpServerInfo> mcpServers = agentMcpServerRepository.findByIdAgentId(a.getId()).stream()
+                .map(am -> mcpServerRepository.findById(am.getId().getMcpServerId()).orElse(null))
+                .filter(s -> s != null && "ACTIVE".equals(s.getStatus()))
+                .map(s -> AgentResponse.AgentMcpServerInfo.builder()
+                        .id(s.getId())
+                        .name(s.getName())
+                        .transportType(s.getTransportType())
+                        .build())
+                .collect(Collectors.toList());
+
         return AgentResponse.builder()
                 .id(a.getId())
                 .name(a.getName())
@@ -232,6 +273,7 @@ public class AgentService {
                 .memoryMode(asString(config.get("memoryMode")))
                 .isSystem(a.isSystem())
                 .skills(skills)
+                .mcpServers(mcpServers)
                 .createdAt(a.getCreatedAt())
                 .updatedAt(a.getUpdatedAt())
                 .build();

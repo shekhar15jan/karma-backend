@@ -66,7 +66,7 @@ WHERE id = 'a0000000-0000-0000-0000-000000000006';
 -- ============================================================
 
 UPDATE public.agents SET
-  configuration = '{"model": "gemini-3.5-flash", "memoryMode": "OFF", "temperature": 0.8, "iterative": true, "scenesPerChunk": 5}',
+  configuration = '{"model": "gemini-3.5-flash", "memoryMode": "OFF", "temperature": 0.8, "iterative": true, "scenesPerChunk": 15}',
   updated_at = now()
 WHERE id = '00000000-0000-0000-0000-00000000a003';
 

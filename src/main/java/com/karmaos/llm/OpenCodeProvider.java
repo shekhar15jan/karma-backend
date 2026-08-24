@@ -104,7 +104,6 @@ public class OpenCodeProvider implements LLMProvider {
             body.put("messages", messages);
             body.put("temperature", request.getTemperature());
             body.put("max_tokens", request.getMaxTokens());
-            body.put("reasoning_effort", "none");
             if (request.getAdditionalParams() != null) {
                 for (Map.Entry<String, Object> entry : request.getAdditionalParams().entrySet()) {
                     body.put(entry.getKey(), entry.getValue());
@@ -113,7 +112,8 @@ public class OpenCodeProvider implements LLMProvider {
 
             var requestSpec = webClient.post()
                 .uri(baseUrl)
-                .contentType(MediaType.APPLICATION_JSON);
+                .contentType(MediaType.APPLICATION_JSON)
+                .header(HttpHeaders.USER_AGENT, "opencode/1.18.16");
 
             if (apiKey != null && !apiKey.isBlank()) {
                 requestSpec = requestSpec.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);

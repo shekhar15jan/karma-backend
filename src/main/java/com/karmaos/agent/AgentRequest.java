@@ -33,4 +33,5 @@ public class AgentRequest {
     private Double temperature;
     private String memoryMode;
     private List<UUID> skillIds;
+    private List<UUID> mcpServerIds;
 }

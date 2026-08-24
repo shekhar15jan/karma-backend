@@ -19,10 +19,9 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Freeware RAG: chunks text, embeds it via the free Google Gemini
- * text-embedding-004 endpoint using the user's Google/Gemini provider key,
- * stores vectors as JSONB, and answers semantic searches with in-Java cosine
- * similarity (no pgvector extension required).
+ * RAG with pgvector: chunks via Gemini text-embedding-004 (768 dims), stores as vector(768),
+ * searches via DB HNSW index (cosine). Falls back to in-Java cosine when pgvector not yet migrated
+ * (e.g. external DB without extension) for zero-downtime.
  */
 @Service
 public class EmbeddingService {
@@ -121,20 +120,51 @@ public class EmbeddingService {
             return List.of();
         }
         int k = Math.max(1, Math.min(topK > 0 ? topK : 5, 10));
+        // Try pgvector native HNSW first
+        try {
+            String vecStr = toVectorString(queryVector);
+            List<Object[]> rows = embeddingRepository.searchSimilar(vecStr, k);
+            if (rows != null && !rows.isEmpty()) {
+                List<SemanticHit> hits = new ArrayList<>();
+                for (Object[] r : rows) {
+                    // SELECT source_type, source_id, content, model, created_at, similarity_score
+                    String sourceType = r[0] != null ? r[0].toString() : "";
+                    UUID sourceId = r[1] != null ? UUID.fromString(r[1].toString()) : null;
+                    String content = r[2] != null ? r[2].toString() : "";
+                    // r[3] model, r[4] created_at ignored
+                    double score = r[5] instanceof Number ? ((Number) r[5]).doubleValue() : 0.0;
+                    hits.add(new SemanticHit(sourceType, sourceId, content, score));
+                }
+                return hits;
+            }
+        } catch (Exception e) {
+            log.debug("pgvector search failed, falling back to Java cosine: {}", e.getMessage());
+        }
+        // Fallback: in-Java cosine (covers pre-migration JSONB rows or DB without extension)
         List<SemanticHit> results = new ArrayList<>();
         try {
             for (SemanticEmbedding row : embeddingRepository.findAll()) {
                 List<Double> vector = objectMapper.readValue(
                         row.getEmbedding(), new TypeReference<List<Double>>() {});
-                double score = cosine(queryVector, vector);
+                double score = cosineJava(queryVector, vector);
                 results.add(new SemanticHit(row.getSourceType(), row.getSourceId(), row.getContent(), score));
             }
         } catch (Exception e) {
-            log.warn("Semantic search failed: {}", e.getMessage());
+            log.warn("Semantic search fallback failed: {}", e.getMessage());
             return List.of();
         }
         results.sort(Comparator.comparingDouble(SemanticHit::score).reversed());
         return results.stream().limit(k).toList();
+    }
+
+    private String toVectorString(List<Double> vector) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < vector.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(vector.get(i));
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     public List<Double> embedText(String text) {
@@ -235,7 +265,7 @@ public class EmbeddingService {
         return chunks;
     }
 
-    private double cosine(List<Double> a, List<Double> b) {
+    private double cosineJava(List<Double> a, List<Double> b) {
         if (a == null || b == null || a.isEmpty() || a.size() != b.size()) {
             return 0.0;
         }

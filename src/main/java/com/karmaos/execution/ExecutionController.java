@@ -112,6 +112,19 @@ public class ExecutionController {
         )));
     }
 
+    @PostMapping("/{id}/retry-video")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> retryVideo(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        ownershipService.getOwnedExecution(user.getId(), id);
+        orchestrator.retryVideoStep(id);
+        return ResponseEntity.ok(ApiResponse.ok(Map.of(
+            "executionId", id.toString(),
+            "status", "RETRYING",
+            "message", "Video step retry triggered — resumes from last successful step"
+        )));
+    }
+
     @GetMapping("/{id}/status")
     public ResponseEntity<ApiResponse<Map<String, Object>>> status(
             @PathVariable UUID id,

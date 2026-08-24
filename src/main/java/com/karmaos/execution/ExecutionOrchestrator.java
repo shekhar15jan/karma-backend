@@ -393,10 +393,38 @@ public class ExecutionOrchestrator {
                 ExecutionStep step = runStep(executionId, sp, i, context, null, missionId);
 
                 if (!"COMPLETED".equals(step.getStatus())) {
-                    executionService.complete(executionId, "FAILED",
-                        "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage());
-                    updateMissionStatus(missionId, "FAILED");
-                    return;
+                    // VIDEO-only auto-retry (up to 3 attempts) to avoid restarting Research/Script
+                    if ("VIDEO".equals(sp.kind)) {
+                        boolean retried = false;
+                        for (int attempt = 1; attempt <= 2; attempt++) {
+                            long backoff = attempt * 4000L + (long) (Math.random() * 2000);
+                            log.warn("VIDEO step failed (attempt {}), retrying in {}ms: {}", attempt, backoff, step.getErrorMessage());
+                            try { Thread.sleep(backoff); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                            emitExecutionEvent(executionId, "step.retry",
+                                "{\"executionId\":\"" + executionId + "\",\"stepOrder\":" + i + ",\"attempt\":" + (attempt+1) + "}");
+                            step = runStep(executionId, sp, i, context, null, missionId);
+                            if ("COMPLETED".equals(step.getStatus())) { retried = true; break; }
+                        }
+                        if (retried) {
+                            log.info("VIDEO step recovered after retry for execution {}", executionId);
+                        } else {
+                            // Leave execution FAILED but resumeIndex points to VIDEO so retryVideoStep can resume
+                            Meta retryMeta = readMeta(execution);
+                            retryMeta.resumeIndex = i;
+                            retryMeta.previousOutput = previousOutput;
+                            saveMeta(execution, retryMeta);
+                            executionService.complete(executionId, "FAILED",
+                                "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage()
+                                + " — retry with POST /api/v1/executions/" + executionId + "/retry-video");
+                            updateMissionStatus(missionId, "FAILED");
+                            return;
+                        }
+                    } else {
+                        executionService.complete(executionId, "FAILED",
+                            "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage());
+                        updateMissionStatus(missionId, "FAILED");
+                        return;
+                    }
                 }
 
                 if (sp.nodeId != null) {
@@ -733,6 +761,63 @@ public class ExecutionOrchestrator {
             result.put(step.getFlowId(), output);
         }
         return result;
+    }
+
+    /**
+     * Retry only the VIDEO step of a FAILED execution, resuming from the
+     * last successful step. Keeps Research/Script/Voice artifacts intact.
+     * Used when previousOutput is already valid but ffmpeg/Remotion failed.
+     */
+    public void retryVideoStep(UUID executionId) {
+        Execution execution = executionRepository.findById(executionId).orElse(null);
+        if (execution == null) {
+            log.warn("Cannot retry video for unknown execution {}", executionId);
+            return;
+        }
+        if (!"FAILED".equals(execution.getStatus())) {
+            log.warn("Execution {} is {} not FAILED — cannot retry video", executionId, execution.getStatus());
+            return;
+        }
+        List<ExecutionStep> steps = stepRepository.findByExecutionIdOrderByStepOrder(executionId);
+        int videoIndex = -1;
+        for (int i = 0; i < steps.size(); i++) {
+            ExecutionStep s = steps.get(i);
+            if ("VIDEO_GENERATION".equals(s.getStepType()) || "VIDEO".equals(s.getStepType())) {
+                videoIndex = s.getStepOrder();
+                break;
+            }
+        }
+        // Fallback: infer from plan (last step is VIDEO for Default Video Flow)
+        if (videoIndex < 0) {
+            List<MissionFlow> mfs = missionFlowRepository.findByIdMissionId(execution.getMissionId());
+            mfs.sort(Comparator.comparingInt(MissionFlow::getExecOrder));
+            PlanHolder holder = buildPlan(mfs);
+            for (int i = 0; i < holder.steps.size(); i++) {
+                if ("VIDEO".equals(holder.steps.get(i).kind)) videoIndex = i;
+            }
+        }
+        if (videoIndex < 0) {
+            log.warn("No VIDEO step found for execution {}", executionId);
+            return;
+        }
+        // Resume from video step, rebuilding previousOutput from last COMPLETED step before it
+        Meta meta = new Meta();
+        meta.resumeIndex = videoIndex;
+        String prev = null;
+        for (int i = videoIndex - 1; i >= 0; i--) {
+            final int idx = i;
+            ExecutionStep s = steps.stream().filter(x -> x.getStepOrder() == idx).findFirst().orElse(null);
+            if (s != null && "COMPLETED".equals(s.getStatus()) && s.getOutputData() != null) { prev = s.getOutputData(); break; }
+        }
+        meta.previousOutput = prev;
+        // Extract nodeOutputs from completed steps for DAG flows
+        execution.setStatus("PENDING");
+        execution.setMetadata(toMetaJson(meta));
+        executionRepository.save(execution);
+        updateMissionStatus(execution.getMissionId(), "RUNNING");
+        log.info("Retrying VIDEO step {} for execution {}", videoIndex, executionId);
+        final Execution execRef = execution;
+        runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef)));
     }
 
     public void cancelExecution(UUID executionId) {

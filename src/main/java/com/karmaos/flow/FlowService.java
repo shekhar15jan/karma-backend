@@ -116,7 +116,7 @@ public class FlowService {
                 .status(flow.getStatus())
                 .isSystem(flow.isSystem())
                 .agentIds(agentIds)
-                .design(extractDesign(flow.getParameters()))
+                .design(extractDesign(flow.getParameters(), agentIds))
                 .runCount(runs.size())
                 .recentRuns(recentRuns)
                 .artifacts(artifacts)
@@ -296,17 +296,68 @@ public class FlowService {
     }
 
     @SuppressWarnings("unchecked")
-    private Map<String, Object> extractDesign(String parameters) {
+    private Map<String, Object> extractDesign(String parameters, List<UUID> agentIds) {
         if (parameters == null || parameters.isBlank()) {
-            return null;
+            return synthesizeDesign(agentIds);
         }
         try {
             Map<String, Object> params = objectMapper.readValue(parameters, new TypeReference<Map<String, Object>>() {});
             Object design = params.get(DesignPlan.KEY_DESIGN);
-            return design instanceof Map ? (Map<String, Object>) design : null;
+            if (design instanceof Map) {
+                Map<String, Object> d = (Map<String, Object>) design;
+                List<?> nodes = (List<?>) d.get("nodes");
+                if (nodes == null || nodes.isEmpty()) {
+                    return synthesizeDesign(agentIds);
+                }
+                return d;
+            }
+            return synthesizeDesign(agentIds);
         } catch (Exception e) {
+            return synthesizeDesign(agentIds);
+        }
+    }
+
+    private Map<String, Object> synthesizeDesign(List<UUID> agentIds) {
+        if (agentIds == null || agentIds.isEmpty()) {
             return null;
         }
+        List<Map<String, Object>> nodes = new ArrayList<>();
+        List<Map<String, Object>> edges = new ArrayList<>();
+        int x = 280;
+        for (int i = 0; i < agentIds.size(); i++) {
+            UUID agentId = agentIds.get(i);
+            String agentName = agentRepository.findById(agentId)
+                    .map(com.karmaos.agent.Agent::getName)
+                    .orElse("Agent");
+            
+            Map<String, Object> node = new HashMap<>();
+            node.put("id", "node-" + i);
+            node.put("agentId", agentId.toString());
+            node.put("agentName", agentName);
+            node.put("label", agentName);
+            node.put("stepKind", "AGENT");
+            node.put("status", "ready");
+            node.put("x", x);
+            node.put("y", 80);
+            nodes.add(node);
+            
+            if (i > 0) {
+                Map<String, Object> edge = new HashMap<>();
+                edge.put("id", "edge-" + (i - 1));
+                edge.put("source", "node-" + (i - 1));
+                edge.put("target", "node-" + i);
+                edge.put("sourcePort", "right");
+                edge.put("targetPort", "left");
+                edge.put("handoff", true);
+                edges.add(edge);
+            }
+            
+            x += 220;
+        }
+        Map<String, Object> design = new HashMap<>();
+        design.put("nodes", nodes);
+        design.put("edges", edges);
+        return design;
     }
 
     private ArtifactResponse toArtifactResponse(Artifact a) {
@@ -348,7 +399,7 @@ public class FlowService {
                 .status(f.getStatus())
                 .isSystem(f.isSystem())
                 .agentIds(agentIds)
-                .design(extractDesign(f.getParameters()))
+                .design(extractDesign(f.getParameters(), agentIds))
                 .createdAt(f.getCreatedAt())
                 .updatedAt(f.getUpdatedAt())
                 .build();

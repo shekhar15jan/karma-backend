@@ -9,8 +9,6 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -35,8 +33,9 @@ public class SemanticEmbedding {
     @Column(nullable = false, columnDefinition = "TEXT")
     private String content;
 
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "JSONB")
+    // pgvector: vector(768) when extension is available, fallback to JSONB for plain postgres
+    // We keep columnDefinition as vector(768) for pgvector; Flyway V38 migrates JSONB -> vector
+    @Column(nullable = false, columnDefinition = "vector(768)")
     private String embedding;
 
     @Column(length = 64)

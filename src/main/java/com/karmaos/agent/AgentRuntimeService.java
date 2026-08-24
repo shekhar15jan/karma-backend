@@ -36,6 +36,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.karmaos.mcp.McpToolService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -66,13 +67,15 @@ public class AgentRuntimeService {
         "bento", "dashboard", "infographic"
     );
 
-    /** Component vocabulary the video renderer supports. Anything else is rejected/coerced. */
+    /** Component vocabulary the video renderer supports. Anything else is coerced to card (not rejected) to avoid 103→40 validation failures. */
     private static final Set<String> ALLOWED_COMPONENT_TYPES = Set.of(
         "heading", "paragraph", "text", "bullet-list", "code", "command",
         "card", "info-card", "warning-card", "stat-card", "quote-card",
         "bar-chart", "donut-chart", "progress-bar", "profile-card",
         "microservice-node", "api-gateway", "message-queue", "docker-node", "kubernetes-node",
-        "logging-node", "browser-node", "aws-node", "azure-node", "gcp-node", "language-node"
+        "logging-node", "browser-node", "aws-node", "azure-node", "gcp-node", "language-node",
+        "arrow", "connector", "arrow-connector",
+        "big-number", "number", "stat", "feature", "comparison", "quote", "timeline", "roadmap", "terminal", "code-explainer"
     );
 
     private final LLMProviderFactory providerFactory;
@@ -92,6 +95,7 @@ public class AgentRuntimeService {
     private final ObjectMapper objectMapper;
     private final RuntimeSettings runtimeSettings;
     private final LlmCacheRepository llmCacheRepository;
+    private final McpToolService mcpToolService;
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
                                ProviderRepository providerRepository,
@@ -109,7 +113,8 @@ public class AgentRuntimeService {
                                KarmaMemoryService karmaMemoryService,
                                ObjectMapper objectMapper,
                                RuntimeSettings runtimeSettings,
-                               LlmCacheRepository llmCacheRepository) {
+                               LlmCacheRepository llmCacheRepository,
+                               McpToolService mcpToolService) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -127,6 +132,7 @@ public class AgentRuntimeService {
         this.objectMapper = objectMapper;
         this.runtimeSettings = runtimeSettings;
         this.llmCacheRepository = llmCacheRepository;
+        this.mcpToolService = mcpToolService;
     }
 
     public ExecutionStep executeAgentStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
@@ -153,6 +159,19 @@ public class AgentRuntimeService {
             String systemPrompt = buildSystemPrompt(agent, flow, missionId);
             String userMessage = buildUserMessage(agent, distilledContext, missionId, reviewerFeedback);
 
+            // Inject MCP tools for this agent (if any) into system prompt
+            try {
+                var mcpCatalog = mcpToolService.getToolsForAgent(agent.getId());
+                String mcpBlock = mcpToolService.buildToolPromptBlock(mcpCatalog);
+                if (!mcpBlock.isBlank()) {
+                    systemPrompt = systemPrompt + mcpBlock;
+                    log.info("MCP: injected {} servers / {} tools into agent {}", mcpCatalog.size(),
+                            mcpCatalog.stream().mapToInt(c -> c.tools().size()).sum(), agent.getName());
+                }
+            } catch (Exception e) {
+                log.warn("MCP tool injection failed for agent {}: {}", agent.getName(), e.getMessage());
+            }
+
             Provider primaryProvider = resolveProvider(agent);
             step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
 
@@ -166,6 +185,8 @@ public class AgentRuntimeService {
 
             LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
                     systemPrompt, userMessage, missionId, resolveMaxTokens(flow, agent, missionId));
+            // MCP tool-call loop (up to 5 chained calls) — provider-agnostic
+            response = handleMcpToolCalls(agent, primaryProvider, step, systemPrompt, userMessage, missionId, response);
             String modelUsed = step.getModelUsed();
 
             step.setPromptTokens(response.getPromptTokens());
@@ -214,6 +235,9 @@ public class AgentRuntimeService {
         int scenesPerChunk = configScenesPerChunk(agent);
         double avgSceneSeconds = Math.max(5.0, Math.min(10.0, target.wordsPerScene() / 2.3));
         int totalScenes = Math.max(1, (int) Math.round(target.targetDurationSeconds() / avgSceneSeconds));
+        // Cap to configured maxScenes to keep payload/render manageable (was generating 69 for 600s/8.7)
+        totalScenes = Math.min(totalScenes, target.maxScenes());
+        totalScenes = Math.max(totalScenes, target.minScenes());
         int numChunks = Math.max(1, (int) Math.ceil(totalScenes / (double) scenesPerChunk));
 
         String rawContent = extractResearchContent(contextData, missionId);
@@ -318,7 +342,7 @@ public class AgentRuntimeService {
             JsonNode config = objectMapper.readTree(agent.getConfiguration());
             if (config.has("scenesPerChunk") && config.get("scenesPerChunk").isInt()) {
                 int k = config.get("scenesPerChunk").asInt();
-                return Math.max(2, Math.min(10, k));
+                return Math.max(2, Math.min(20, k));
             }
         } catch (Exception e) {
             // fall through to default
@@ -668,7 +692,7 @@ public class AgentRuntimeService {
                 if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null) {
                     String err = lastResponse.getErrorMessage().toLowerCase();
                     if (err.contains("429") || err.contains("rate limit") || err.contains("too many requests")) {
-                        long sleepTime = (long) (Math.pow(2, attempt + 2) * 1000) + (long) (Math.random() * 3000);
+                        long sleepTime = (long) (30 * 1000 * attempt) + (long) (Math.random() * 5000);
                         log.warn("Rate limit hit, applying exponential backoff. Sleeping for {} ms before retry", sleepTime);
                         try {
                             Thread.sleep(sleepTime);
@@ -730,6 +754,49 @@ public class AgentRuntimeService {
             return LLMResponse.error("No usable LLM provider available");
         }
         return lastResponse;
+    }
+
+    private LLMResponse handleMcpToolCalls(Agent agent, Provider primaryProvider, ExecutionStep step,
+                                           String systemPrompt, String userMessage, UUID missionId,
+                                           LLMResponse initial) {
+        if (initial == null || !initial.isSuccess() || initial.getContent() == null) return initial;
+        try {
+            var catalog = mcpToolService.getToolsForAgent(agent.getId());
+            if (catalog == null || catalog.isEmpty()) return initial;
+            int totalTools = catalog.stream().mapToInt(c -> c.tools().size()).sum();
+            if (totalTools == 0) return initial;
+            var toolCall = mcpToolService.parseToolCall(initial.getContent());
+            if (toolCall == null) return initial;
+            log.info("MCP tool call detected from {}: {} on {}", agent.getName(), toolCall.tool(), toolCall.serverName());
+            LLMResponse current = initial;
+            StringBuilder conversation = new StringBuilder(userMessage);
+            conversation.append("\n\n[LLM output]\n").append(current.getContent());
+            for (int i = 0; i < 5; i++) {
+                var call = mcpToolService.parseToolCall(current.getContent());
+                if (call == null) break;
+                JsonNode result;
+                try {
+                    result = mcpToolService.executeToolCall(call, catalog);
+                } catch (Exception e) {
+                    log.warn("MCP tool {} failed: {}", call.tool(), e.getMessage());
+                    result = objectMapper.createObjectNode().put("error", e.getMessage());
+                }
+                String resultStr;
+                try { resultStr = objectMapper.writeValueAsString(result); } catch (Exception e) { resultStr = result.toString(); }
+                conversation.append("\n\n[Tool result for ").append(call.tool()).append("]\n").append(resultStr);
+                conversation.append("\n\nContinue to produce the final deliverable using the tool result above. Do not call the same tool with identical arguments again.");
+                LLMResponse next = executeWithRetryAndFallback(agent, primaryProvider, step, systemPrompt, conversation.toString(), missionId, 4096, content -> content != null && !content.isBlank(), false);
+                if (next == null || !next.isSuccess()) break;
+                // if next still contains a tool_call, loop; otherwise return it
+                if (mcpToolService.parseToolCall(next.getContent()) == null) return next;
+                current = next;
+                conversation.append("\n\n[LLM output]\n").append(current.getContent());
+            }
+            return current;
+        } catch (Exception e) {
+            log.warn("MCP tool handling failed for {}: {}", agent.getName(), e.getMessage());
+            return initial;
+        }
     }
 
     private String computeHash(String model, String system, String user, double temp) {

@@ -33,6 +33,7 @@ public class AgentResponse {
     @JsonProperty("isSystem")
     private boolean isSystem;
     private List<AgentSkillInfo> skills;
+    private List<AgentMcpServerInfo> mcpServers;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -43,5 +44,15 @@ public class AgentResponse {
     public static class AgentSkillInfo {
         private UUID id;
         private String name;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class AgentMcpServerInfo {
+        private UUID id;
+        private String name;
+        private String transportType;
     }
 }
