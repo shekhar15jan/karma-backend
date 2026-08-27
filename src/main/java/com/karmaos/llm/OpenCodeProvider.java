@@ -41,14 +41,19 @@ public class OpenCodeProvider implements LLMProvider {
 
     @Override
     public List<String> getAvailableModels() {
+        // Live catalog at https://opencode.ai/zen/v1/models (66 ids, 2026-08-27). Free tier = *-free + big-pickle.
+        // Keep hardcoded fallback in sync with live free tier so fallback chain + UI dropdown work without network.
         return List.of(
+            "muse-spark-1.2-contributor-free",
             "deepseek-v4-flash-free",
             "big-pickle",
             "mimo-v2.5-free",
             "laguna-s-2.1-free",
             "ling-3.0-flash-free",
             "north-mini-code-free",
-            "nemotron-3-ultra-free"
+            "nemotron-3-ultra-free",
+            "nemotron-3.5-lightning-free",
+            "hy3-free"
         );
     }
 

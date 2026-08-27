@@ -820,6 +820,83 @@ public class ExecutionOrchestrator {
         runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef)));
     }
 
+    public void retryScriptStep(UUID executionId) {
+        Execution execution = executionRepository.findById(executionId).orElse(null);
+        if (execution == null) {
+            log.warn("Cannot retry script for unknown execution {}", executionId);
+            return;
+        }
+        if (!"FAILED".equals(execution.getStatus())) {
+            log.warn("Execution {} is {} not FAILED — cannot retry script", executionId, execution.getStatus());
+            return;
+        }
+        List<ExecutionStep> steps = stepRepository.findByExecutionIdOrderByStepOrder(executionId);
+        ExecutionStep failedStep = null;
+        for (ExecutionStep s : steps) {
+            if ("FAILED".equals(s.getStatus()) && s.getAgentId() != null) {
+                Agent agent = agentRepository.findById(s.getAgentId()).orElse(null);
+                if (agent != null && agent.getName() != null && agent.getName().toLowerCase().contains("script")) {
+                    failedStep = s;
+                    break;
+                }
+            }
+        }
+        if (failedStep == null) {
+            log.warn("No failed script step found for execution {}", executionId);
+            return;
+        }
+        // If the failed step already has a partial script (from per-chunk persistence), try to coerce and complete it
+        String partial = failedStep.getOutputData();
+        if (partial != null && partial.contains("script_body")) {
+            try {
+                Agent agent = agentRepository.findById(failedStep.getAgentId()).orElse(null);
+                if (agent != null && agentRuntimeService.isOutputValidFor(agent, partial)) {
+                    log.info("Retrying script: partial output now valid for execution {} (coercion fixed it), marking COMPLETED", executionId);
+                    failedStep.setStatus("COMPLETED");
+                    failedStep.setErrorMessage(null);
+                    stepRepository.save(failedStep);
+                    // Resume from next step (Voice)
+                    Meta meta = new Meta();
+                    meta.resumeIndex = failedStep.getStepOrder() + 1;
+                    meta.previousOutput = partial;
+                    execution.setStatus("PENDING");
+                    execution.setMetadata(toMetaJson(meta));
+                    executionRepository.save(execution);
+                    updateMissionStatus(execution.getMissionId(), "RUNNING");
+                    final Execution execRef = execution;
+                    runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef)));
+                    return;
+                }
+            } catch (Exception e) {
+                log.warn("Retry script validation failed for {}: {}", executionId, e.getMessage());
+            }
+        }
+        // Otherwise, resume script from last successful chunk (or from scratch if no partial)
+        Meta meta = new Meta();
+        meta.resumeIndex = failedStep.getStepOrder();
+        String prev = null;
+        for (int i = failedStep.getStepOrder() - 1; i >= 0; i--) {
+            final int idx = i;
+            ExecutionStep s = steps.stream().filter(x -> x.getStepOrder() == idx).findFirst().orElse(null);
+            if (s != null && "COMPLETED".equals(s.getStatus()) && s.getOutputData() != null) {
+                prev = s.getOutputData();
+                break;
+            }
+        }
+        meta.previousOutput = prev;
+        // Keep partial progress as previousOutput if it exists (so generateScriptIteratively can resume)
+        if (partial != null && partial.contains("script_body") && (prev == null || partial.length() > prev.length())) {
+            meta.previousOutput = partial;
+        }
+        execution.setStatus("PENDING");
+        execution.setMetadata(toMetaJson(meta));
+        executionRepository.save(execution);
+        updateMissionStatus(execution.getMissionId(), "RUNNING");
+        log.info("Retrying SCRIPT step {} for execution {} (will resume from chunk {})", failedStep.getStepOrder(), executionId, meta.resumeIndex);
+        final Execution execRef2 = execution;
+        runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef2)));
+    }
+
     public void cancelExecution(UUID executionId) {
         CompletableFuture<Void> future = activeExecutions.get(executionId);
         if (future != null) {

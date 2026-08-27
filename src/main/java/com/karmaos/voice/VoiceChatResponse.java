@@ -1,5 +1,6 @@
 package com.karmaos.voice;
 
+import java.util.List;
 import java.util.Map;
 
 public class VoiceChatResponse {
@@ -10,6 +11,8 @@ public class VoiceChatResponse {
     private String language;
     private String eventId;
     private Map<String, Object> action;
+    /** Multi-step plan: executed sequentially by the UI, max 5 steps. */
+    private List<Map<String, Object>> actions;
 
     public VoiceChatResponse() {}
 
@@ -34,6 +37,8 @@ public class VoiceChatResponse {
     public void setEventId(String eventId) { this.eventId = eventId; }
     public Map<String, Object> getAction() { return action; }
     public void setAction(Map<String, Object> action) { this.action = action; }
+    public List<Map<String, Object>> getActions() { return actions; }
+    public void setActions(List<Map<String, Object>> actions) { this.actions = actions; }
 
     public static VoiceChatResponse fromLlm(String reply, String intent, String target) {
         return new VoiceChatResponse(reply, intent, target, true);

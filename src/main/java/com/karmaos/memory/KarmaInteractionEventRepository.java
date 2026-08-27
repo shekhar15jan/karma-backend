@@ -10,5 +10,7 @@ public interface KarmaInteractionEventRepository extends JpaRepository<KarmaInte
 
     List<KarmaInteractionEvent> findTop20ByUserIdOrderByCreatedAtDesc(UUID userId);
 
+    List<KarmaInteractionEvent> findTop50ByUserIdOrderByCreatedAtDesc(UUID userId);
+
     Optional<KarmaInteractionEvent> findByIdAndUserId(UUID id, UUID userId);
 }

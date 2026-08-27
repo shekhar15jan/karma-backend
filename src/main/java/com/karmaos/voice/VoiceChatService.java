@@ -1,8 +1,11 @@
 package com.karmaos.voice;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.access.OwnershipService;
+import com.karmaos.agent.Agent;
+import com.karmaos.agent.AgentRepository;
 import com.karmaos.agent.AgentResponse;
 import com.karmaos.agent.AgentService;
 import com.karmaos.execution.Execution;
@@ -16,6 +19,9 @@ import com.karmaos.llm.LLMProvider;
 import com.karmaos.llm.LLMProviderFactory;
 import com.karmaos.llm.LLMRequest;
 import com.karmaos.llm.LLMResponse;
+import com.karmaos.mcp.McpToolService;
+import com.karmaos.memory.KarmaInteractionEvent;
+import com.karmaos.memory.KarmaInteractionEventRepository;
 import com.karmaos.memory.KarmaMemoryService;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
@@ -63,6 +69,9 @@ public class VoiceChatService {
     private final KarmaMemoryService karmaMemoryService;
     private final EmbeddingService embeddingService;
     private final RuntimeSettings runtimeSettings;
+    private final McpToolService mcpToolService;
+    private final AgentRepository agentRepository;
+    private final KarmaInteractionEventRepository interactionEventRepository;
 
     public VoiceChatService(AgentService agentService, ProviderRepository providerRepository,
                             ProviderKeyCipher providerKeyCipher,
@@ -73,7 +82,9 @@ public class VoiceChatService {
                             WorkspaceRepository workspaceRepository, ProjectRepository projectRepository,
                             FlowRepository flowRepository,
                             KarmaMemoryService karmaMemoryService, EmbeddingService embeddingService,
-                            RuntimeSettings runtimeSettings) {
+                            RuntimeSettings runtimeSettings,
+                            McpToolService mcpToolService, AgentRepository agentRepository,
+                            KarmaInteractionEventRepository interactionEventRepository) {
         this.agentService = agentService;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -91,6 +102,9 @@ public class VoiceChatService {
         this.karmaMemoryService = karmaMemoryService;
         this.embeddingService = embeddingService;
         this.runtimeSettings = runtimeSettings;
+        this.mcpToolService = mcpToolService;
+        this.agentRepository = agentRepository;
+        this.interactionEventRepository = interactionEventRepository;
     }
 
     public VoiceChatResponse chat(VoiceChatRequest request, UUID userId, String role) {
@@ -104,12 +118,20 @@ public class VoiceChatService {
             return languageMatch;
         }
 
+        // LLM is the primary brain; the static FAQ table is only a fallback when
+        // every provider fails or none is configured. This kills keyword false-positives.
+        VoiceChatResponse llmResponse = callLlm(request, userId, role);
+        if (llmResponse != null && llmResponse.isFromLlm()) {
+            return llmResponse;
+        }
+
         VoiceChatResponse staticMatch = tryStaticFaq(text);
         if (staticMatch != null) {
             return staticMatch;
         }
 
-        return callLlm(request, userId, role);
+        return llmResponse != null ? llmResponse
+                : VoiceChatResponse.staticReply("I couldn't process that right now. Please try again.", "chat", "");
     }
 
     // ========== LANGUAGE SWITCH (intent "language" + target code) ==========
@@ -352,37 +374,169 @@ public class VoiceChatService {
         try {
             String language = detectLanguage(request);
             String systemPrompt = buildSystemPrompt(request, language, userId, role);
-            LLMRequest llmRequest = new LLMRequest(systemPrompt, null);
-            llmRequest.setModel(LLM_MODEL);
-            llmRequest.setTemperature(0.5);
-            llmRequest.setMaxTokens(1200);
-            llmRequest.setMessages(buildHistoryMessages(request));
+            List<Map<String, String>> history = buildHistoryMessages(request);
 
-            LLMProvider llmProvider = resolveLlmProvider();
-            if (llmProvider == null) {
+            List<ChainEntry> chain = resolveLlmProviderChain();
+            if (chain.isEmpty()) {
                 return VoiceChatResponse.staticReply(
                         "I'm having trouble connecting to my AI backend. Please check your provider settings.", "chat", "");
             }
 
-            if ("gemini".equals(llmProvider.getName())
-                    && runtimeSettings.getBoolean(RuntimeSettings.KEY_GOOGLE_SEARCH_GROUNDING, false)) {
-                llmRequest.setAdditionalParams(Map.of("googleSearchGrounding", true));
+            for (ChainEntry entry : chain) {
+                try {
+                    LLMRequest llmRequest = new LLMRequest(systemPrompt, null);
+                    llmRequest.setModel(resolveChatModel(entry.provider(), entry.llm()));
+                    llmRequest.setTemperature(0.5);
+                    llmRequest.setMaxTokens(1200);
+                    llmRequest.setMessages(history);
+
+                    String pType = entry.provider() != null && entry.provider().getProviderType() != null
+                            ? entry.provider().getProviderType().toLowerCase() : "";
+                    llmRequest.setSystemPrompt(fitPromptForProvider(pType, systemPrompt));
+
+                    if ((pType.equals("gemini") || pType.equals("google"))
+                            && runtimeSettings.getBoolean(RuntimeSettings.KEY_GOOGLE_SEARCH_GROUNDING, false)) {
+                        llmRequest.setAdditionalParams(Map.of("googleSearchGrounding", true));
+                    }
+
+                    LLMResponse llmResponse = entry.llm().chat(llmRequest);
+                    if (llmResponse.isSuccess()) {
+                        return parseLlmResponse(llmResponse.getContent(), language);
+                    }
+                    log.warn("Karma AI chat via {} ({}) failed: {}",
+                            entry.llm().getName(), entry.provider() != null ? entry.provider().getName() : "?",
+                            llmResponse.getErrorMessage());
+                } catch (Exception e) {
+                    log.warn("Karma AI chat provider {} threw: {}",
+                            entry.llm().getName(), e.getMessage());
+                }
             }
-
-            LLMResponse llmResponse = llmProvider.chat(llmRequest);
-            if (!llmResponse.isSuccess()) {
-                log.warn("LLM call failed: {}", llmResponse.getErrorMessage());
-                return VoiceChatResponse.staticReply(
-                        "I couldn't process that right now. Please try again.", "chat", "");
-            }
-
-            return parseLlmResponse(llmResponse.getContent(), language);
-
+            return VoiceChatResponse.staticReply(
+                    "I couldn't process that right now. Please try again.", "chat", "");
         } catch (Exception e) {
             log.error("VoiceChatService error", e);
             return VoiceChatResponse.staticReply(
                     "Something went wrong. Please try again.", "chat", "");
         }
+    }
+
+    /** Ordered provider fallback chain for chat: OPENCODE first (free), then name-sorted. LLM-capable types only. */
+    private List<ChainEntry> resolveLlmProviderChain() {
+        List<ChainEntry> chain = new java.util.ArrayList<>();
+        List<Provider> connected = providerRepository.findByStatus("CONNECTED").stream()
+                .filter(p -> p.getDeletedAt() == null)
+                .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
+                .filter(this::isChatCapableType)
+                .sorted(Comparator.comparing((Provider p) -> !"OPENCODE".equalsIgnoreCase(p.getProviderType()))
+                        .thenComparing(Provider::getName, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+        for (Provider p : connected) {
+            try {
+                String apiKey = providerKeyCipher.decrypt(p.getEncryptedApiKey());
+                LLMProvider lp = llmProviderFactory.getProvider(p.getProviderType(), apiKey, p.getApiEndpoint());
+                if (lp != null && !"mock".equalsIgnoreCase(lp.getName())) {
+                    chain.add(new ChainEntry(p, lp));
+                }
+            } catch (Exception e) {
+                log.warn("Failed to create provider {}: {}", p.getProviderType(), e.getMessage());
+            }
+        }
+        return chain;
+    }
+
+    private boolean isChatCapableType(Provider p) {
+        String t = p.getProviderType() != null ? p.getProviderType().toLowerCase() : "";
+        return t.equals("google") || t.equals("gemini") || t.equals("openrouter")
+                || t.equals("opencode") || t.equals("groq");
+    }
+
+    /** Per-provider model: first model in the Provider row's catalog, else the client default. */
+    private String resolveChatModel(Provider provider, LLMProvider llm) {
+        try {
+            if (provider != null && provider.getModels() != null && !provider.getModels().isBlank()) {
+                JsonNode arr = objectMapper.readTree(provider.getModels());
+                if (arr.isArray() && arr.size() > 0 && !arr.get(0).asText().isBlank()) {
+                    return arr.get(0).asText();
+                }
+            }
+        } catch (Exception ignored) {}
+        return llm.getDefaultModel();
+    }
+
+    private record ChainEntry(Provider provider, LLMProvider llm) {}
+
+    /**
+     * Per-provider prompt budget: keeps head (persona/language/policy/memory/recap)
+     * and tail (live system state) — drops the middle when over a provider's payload limit.
+     * Fixes Groq 413 Payload Too Large caused by the full Black Book injection.
+     */
+    private String fitPromptForProvider(String type, String prompt) {
+        int cap = switch (type) {
+            case "groq" -> 14000;
+            case "opencode" -> 30000;
+            default -> 60000;
+        };
+        if (prompt == null || prompt.length() <= cap) return prompt;
+        int head = cap * 2 / 3;
+        int tail = cap - head;
+        return prompt.substring(0, head)
+                + "\n\n…[middle truncated to fit provider payload limit]…\n\n"
+                + prompt.substring(prompt.length() - tail);
+    }
+
+    private UUID resolveKarmaAiAgentId() {
+        try {
+            return agentRepository.findByNameContainingIgnoreCase("Karma AI").stream()
+                    .filter(a -> "ACTIVE".equals(a.getStatus()))
+                    .findFirst()
+                    .map(Agent::getId)
+                    .orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * P2.1 rolling recap: the UI sends only the last ~10 messages; this recovers
+     * OLDER turns from the interaction log so the model keeps long-range context.
+     * Deterministic truncation — no extra LLM call, negligible tokens.
+     */
+    private String buildConversationRecap(UUID userId) {
+        try {
+            if (userId == null) return "";
+            List<KarmaInteractionEvent> events =
+                    interactionEventRepository.findTop50ByUserIdOrderByCreatedAtDesc(userId);
+            // Skip the newest 12 entries — those are already in the live history window
+            List<KarmaInteractionEvent> older = new java.util.ArrayList<>();
+            for (int i = 12; i < events.size() && older.size() < 8; i++) {
+                KarmaInteractionEvent e = events.get(i);
+                if (e.getUserMessage() != null && !e.getUserMessage().isBlank()) {
+                    older.add(e);
+                }
+            }
+            if (older.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder("OLDER CONVERSATION RECAP (beyond the live window; use only if relevant):\n");
+            java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d");
+            for (KarmaInteractionEvent e : older) {
+                String q = truncateOneLine(e.getUserMessage(), 90);
+                String a = e.getKarmaReply() != null ? truncateOneLine(e.getKarmaReply(), 70) : "";
+                String when = e.getCreatedAt() != null ? e.getCreatedAt().format(fmt) : "";
+                sb.append("- [").append(when).append("] asked: ").append(q);
+                if (!a.isBlank()) sb.append(" | answered: ").append(a);
+                sb.append("\n");
+            }
+            sb.append("\n");
+            return sb.toString();
+        } catch (Exception e) {
+            log.debug("Conversation recap failed: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    private String truncateOneLine(String text, int max) {
+        if (text == null) return "";
+        String one = text.replaceAll("\\s+", " ").trim();
+        return one.length() <= max ? one : one.substring(0, max) + "…";
     }
 
     private List<Map<String, String>> buildHistoryMessages(VoiceChatRequest request) {
@@ -446,7 +600,8 @@ public class VoiceChatService {
 
         sb.append("LANGUAGE: The user prefers to communicate in ").append(languageName(language));
         sb.append(" (ISO code: ").append(language).append("). ALWAYS write your entire \"reply\" in ").append(languageName(language));
-        sb.append(" unless the user explicitly asks you to use another language. Set the \"language\" field in your JSON output to the ISO code you actually used.\n\n");
+        sb.append(" unless the user explicitly asks you to use another language. Set the \"language\" field in your JSON output to the ISO code you actually used.\n");
+        sb.append("AUTO-DETECT OVERRIDE: If the user's text is clearly written in a DIFFERENT language than the preference above, detect it and reply in THEIR language instead, setting \"language\" to that ISO code. This applies to ANY language worldwide — you are not restricted to a fixed list.\n\n");
 
         sb.append("SYSTEM KNOWLEDGE (BLACK BOOK):\n");
         try {
@@ -480,7 +635,8 @@ public class VoiceChatService {
             sb.append("");
         }
 
-        sb.append("ACTION-ORIENTED MINDSET: You are the operator of KARMA OS. When the user asks you to do something in the system, DO it through the UI action contract — do not decline, do not just describe it, and do not restate limitations. Open the right screen or modal, pre-fill the form, and tell the user what to confirm in the UI. Use the live system state above to pick the correct workspace, project, provider, and run mode.\n\n");
+        sb.append("ACTION-ORIENTED MINDSET: You are the operator of KARMA OS. When the user asks you to do something in the system, DO it through the UI action contract — do not decline, do not just describe it, and do not restate limitations. Open the right screen or modal, pre-fill the form, and tell the user what to confirm in the UI. Use the live system state above to pick the correct workspace, project, provider, and run mode.\n");
+        sb.append("MULTI-STEP TASKS: If one request implies several operations (e.g. \"create a workspace, a project in it, and run a video mission\"), return an \"actions\" JSON array of up to 5 action objects IN ORDER, plus one short \"reply\" confirming the plan. The UI executes them sequentially.\n\n");
 
         sb.append("OPERATOR ROLE: The signed-in user has role \"").append(role).append("\". Only two roles exist: ADMIN and OPERATOR. Respect role boundaries: do NOT emit or offer actions the role cannot perform, and never suggest bypassing permissions. If the user asks for something outside their role, explain briefly what their role can do and, when possible, offer the closest permitted action or navigate them to the relevant screen.\n");
         sb.append("Role boundaries (verb → allowed roles):\n");
@@ -501,7 +657,27 @@ public class VoiceChatService {
         }
         sb.append("Memory rules: these are hints from past conversations/actions to personalize the experience. If the user's NEW instruction contradicts a learned memory, the new instruction wins. Do not treat learned memory as a role or permission grant.\n\n");
 
+        // Rolling conversation recap — older turns beyond the live history window
+        sb.append(buildConversationRecap(userId));
+
+        // MCP tools bound to the Karma AI agent — discoverable + callable from chat
+        try {
+            UUID karmaAiId = resolveKarmaAiAgentId();
+            if (karmaAiId != null) {
+                var catalog = mcpToolService.getToolsForAgent(karmaAiId);
+                String toolsBlock = mcpToolService.buildToolPromptBlock(catalog);
+                if (!toolsBlock.isBlank()) {
+                    sb.append(toolsBlock).append("\n");
+                    sb.append("When you output a tool_call JSON, the system executes it and returns the result to you before your final answer.\n\n");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("MCP tool injection for Karma AI failed: {}", e.getMessage());
+        }
+
         sb.append("CURRENT SYSTEM STATE:\n");
+        sb.append("- Snapshot taken: ").append(java.time.LocalDateTime.now())
+          .append(" (live at prompt-build time; if the user asks for fresher numbers, suggest refreshing the page)\n");
 
         // Agents
         try {
@@ -673,6 +849,7 @@ public class VoiceChatService {
             Map<String, Object> action = node.has("action") && node.get("action").isObject()
                     ? objectMapper.convertValue(node.get("action"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {})
                     : null;
+            List<Map<String, Object>> actions = extractActions(node);
             if ("doc".equalsIgnoreCase(intent)) {
                 intent = "chat";
                 target = "";
@@ -688,6 +865,8 @@ public class VoiceChatService {
                 if (inner.has("action") && inner.get("action").isObject()) {
                     action = objectMapper.convertValue(inner.get("action"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
                 }
+                List<Map<String, Object>> innerActions = extractActions(inner);
+                if (innerActions != null) actions = innerActions;
             }
 
             String trimmed = reply.trim();
@@ -708,10 +887,23 @@ public class VoiceChatService {
             }
             VoiceChatResponse resp = withLanguage(VoiceChatResponse.fromLlm(reply, intent, target), language);
             resp.setAction(action);
+            if (actions != null && !actions.isEmpty()) {
+                resp.setActions(actions.size() > 5 ? actions.subList(0, 5) : actions);
+            }
             return resp;
         } catch (Exception e) {
             return withLanguage(VoiceChatResponse.fromLlm(cleanUp(content), "chat", ""), fallbackLanguage);
         }
+    }
+
+    private List<Map<String, Object>> extractActions(JsonNode node) {
+        try {
+            if (node != null && node.has("actions") && node.get("actions").isArray()) {
+                return objectMapper.convertValue(node.get("actions"),
+                        new TypeReference<List<Map<String, Object>>>() {});
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     private VoiceChatResponse withLanguage(VoiceChatResponse resp, String language) {

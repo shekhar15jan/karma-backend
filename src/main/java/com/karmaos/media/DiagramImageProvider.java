@@ -98,15 +98,113 @@ public class DiagramImageProvider implements ImageProvider {
             if (spec == null) {
                 return ImageResponse.error("Diagram provider requires a diagram_spec JSON prompt");
             }
+            // Try Mermaid first (Dagre layout engine), fallback to Java2D grid
+            try {
+                Path mermaidFile = renderWithMermaid(spec);
+                if (mermaidFile != null && Files.exists(mermaidFile)) {
+                    log.info("Rendered diagram via Mermaid to {}", mermaidFile);
+                    return ImageResponse.ok(List.of(mermaidFile.toUri().toString()), prompt, getDefaultModel(), 20);
+                }
+            } catch (Exception me) {
+                log.warn("Mermaid render failed, falling back to Java2D: {}", me.getMessage());
+            }
             BufferedImage img = render(spec);
             Path file = outputDir.resolve("diagram-" + System.currentTimeMillis() + "-" + Math.abs(spec.hashCode()) + ".png");
             ImageIO.write(img, "png", file.toFile());
-            log.info("Rendered diagram to {}", file);
+            log.info("Rendered diagram to {} via Java2D fallback", file);
             return ImageResponse.ok(List.of(file.toUri().toString()), prompt, getDefaultModel(), 20);
         } catch (Exception e) {
             log.error("Diagram rendering failed", e);
             return ImageResponse.error("Diagram rendering failed: " + e.getMessage());
         }
+    }
+
+    private Path renderWithMermaid(JsonNode spec) throws Exception {
+        String mmd = toMermaid(spec);
+        if (mmd == null || mmd.isBlank()) return null;
+        Path tmpIn = Files.createTempFile("mermaid-", ".mmd");
+        Path tmpOut = outputDir.resolve("diagram-mermaid-" + System.currentTimeMillis() + "-" + Math.abs(mmd.hashCode()) + ".png");
+        Files.writeString(tmpIn, mmd);
+        // npx -y @mermaid-js/mermaid-cli -i input.mmd -o output.png -b white -w 1920 -H 1080
+        ProcessBuilder pb = new ProcessBuilder(
+                "npx", "-y", "@mermaid-js/mermaid-cli",
+                "-i", tmpIn.toAbsolutePath().toString(),
+                "-o", tmpOut.toAbsolutePath().toString(),
+                "-b", "white",
+                "-w", String.valueOf(W),
+                "-H", String.valueOf(H)
+        );
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String out = new String(p.getInputStream().readAllBytes());
+        int exit = p.waitFor();
+        Files.deleteIfExists(tmpIn);
+        if (exit != 0) {
+            log.warn("Mermaid CLI exit {} output: {}", exit, out);
+            Files.deleteIfExists(tmpOut);
+            return null;
+        }
+        if (!Files.exists(tmpOut)) {
+            log.warn("Mermaid output not found, CLI output: {}", out);
+            return null;
+        }
+        return tmpOut;
+    }
+
+    private String toMermaid(JsonNode spec) {
+        List<ShapeBox> boxes = parseShapes(spec);
+        List<ArrowSpec> arrows = parseArrows(spec);
+        if (boxes.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder();
+        sb.append("flowchart TD\n");
+        // Mermaid node definitions with shape mapping
+        for (ShapeBox b : boxes) {
+            String id = sanitizeMermaidId(b.id);
+            String label = escapeMermaidLabel(b.label);
+            String type = b.type == null ? "box" : b.type.toLowerCase();
+            String nodeDef;
+            switch (type) {
+                case "diamond", "decision" -> nodeDef = id + "{" + label + "}";
+                case "oval", "ellipse", "circle", "start", "end" -> nodeDef = id + "([ " + label + " ])";
+                case "parallelogram", "input", "output" -> nodeDef = id + "[/ " + label + " /]";
+                case "cylinder", "database" -> nodeDef = id + "[(" + label + ")]";
+                case "hexagon", "process" -> nodeDef = id + "{{" + label + "}}";
+                default -> nodeDef = id + "[" + label + "]";
+            }
+            // style fill/stroke
+            String fill = toHex(b.fill, DEF_FILL);
+            String stroke = toHex(b.line, DEF_LINE);
+            sb.append("    ").append(nodeDef).append("\n");
+            sb.append("    style ").append(id).append(" fill:").append(fill).append(",stroke:").append(stroke).append(",stroke-width:2px\n");
+        }
+        for (ArrowSpec a : arrows) {
+            String from = sanitizeMermaidId(a.from);
+            String to = sanitizeMermaidId(a.to);
+            if (from == null || to == null) continue;
+            String label = a.label != null && !a.label.isBlank() ? " |" + escapeMermaidLabel(a.label) + "|" : "";
+            sb.append("    ").append(from).append(" -->").append(label).append(" ").append(to).append("\n");
+        }
+        // Title as comment
+        String title = textOf(spec.get("title"));
+        if (title != null && !title.isBlank()) {
+            sb.insert(0, "---\ntitle: " + escapeMermaidLabel(title) + "\n---\n");
+        }
+        return sb.toString();
+    }
+
+    private static String sanitizeMermaidId(String id) {
+        if (id == null) return null;
+        return id.replaceAll("[^a-zA-Z0-9_]", "_");
+    }
+
+    private static String escapeMermaidLabel(String label) {
+        if (label == null) return "";
+        return label.replace("\"", "'").replace("\n", " ").replace("|", "/");
+    }
+
+    private static String toHex(Color c, Color def) {
+        if (c == null) c = def;
+        return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
     }
 
     @Override

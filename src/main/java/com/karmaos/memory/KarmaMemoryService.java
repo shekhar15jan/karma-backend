@@ -119,6 +119,7 @@ public class KarmaMemoryService {
             String priority = str(params.get("priority"));
             String missionType = str(params.get("missionType"));
             String providerId = str(params.get("providerId"));
+            String theme = str(params.get("theme"));
 
             if (runMode != null && ("AUTO".equalsIgnoreCase(runMode) || "REVIEW".equalsIgnoreCase(runMode))) {
                 reinforce(userId, "preferred.run_mode", runMode.toUpperCase());
@@ -131,6 +132,21 @@ public class KarmaMemoryService {
             }
             if (providerId != null && !providerId.isBlank() && actionType.contains("mission")) {
                 reinforce(userId, "preferred.provider_id", providerId);
+            }
+            if (theme != null && !theme.isBlank()) {
+                reinforce(userId, "preferred.theme", theme);
+            }
+            // Learn favorite screen from successful navigation
+            if ("navigate".equalsIgnoreCase(actionType)) {
+                Map<String, Object> nested = params.get("params") instanceof Map<?, ?>
+                        ? (Map<String, Object>) params.get("params") : null;
+                String page = str(params.get("page"));
+                if ((page == null || page.isBlank()) && nested != null) {
+                    page = str(nested.get("page"));
+                }
+                if (page != null && !page.isBlank()) {
+                    reinforce(userId, "preferred.screen", page);
+                }
             }
         } catch (Exception e) {
             log.warn("Failed to learn from action {}: {}", actionType, e.getMessage());

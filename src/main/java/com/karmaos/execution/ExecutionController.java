@@ -125,6 +125,19 @@ public class ExecutionController {
         )));
     }
 
+    @PostMapping("/{id}/retry-script")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> retryScript(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        ownershipService.getOwnedExecution(user.getId(), id);
+        orchestrator.retryScriptStep(id);
+        return ResponseEntity.ok(ApiResponse.ok(Map.of(
+            "executionId", id.toString(),
+            "status", "RETRYING",
+            "message", "Script step retry triggered — resumes from last successful chunk (coercion applied)"
+        )));
+    }
+
     @GetMapping("/{id}/status")
     public ResponseEntity<ApiResponse<Map<String, Object>>> status(
             @PathVariable UUID id,

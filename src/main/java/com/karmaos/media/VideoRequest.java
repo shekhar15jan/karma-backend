@@ -35,4 +35,7 @@ public class VideoRequest {
     
     /** Chapter markers for YouTube (Remotion provider). */
     private List<VideoChapter> chapters;
+
+    /** Whether to show intro card — false for immediate hook (Refinement 1). */
+    private Boolean enableIntro;
 }

@@ -26,4 +26,7 @@ public class VideoScene {
     
     /** JSON string for per-scene captions array */
     private String captions;
+
+    /** Per-scene transition override (e.g., fade, slide-left, wipe-left, zoom) */
+    private String transition;
 }

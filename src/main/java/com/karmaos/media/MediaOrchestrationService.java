@@ -634,6 +634,13 @@ public class MediaOrchestrationService {
                 step.setCompletedAt(LocalDateTime.now());
                 return executionService.saveStep(executionId, step);
             }
+            // Cap scenes to 22 to match new top-tier quality settings (words_per_scene 55, target 480s, ~20-24 scenes, animated motion)
+            int maxVideoScenes = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_MAX_SCENES, 22);
+            maxVideoScenes = Math.min(maxVideoScenes, 22);
+            if (scenes.size() > maxVideoScenes) {
+                log.warn("Truncating video scenes from {} to {} to match quality bar (words_per_scene 55)", scenes.size(), maxVideoScenes);
+                scenes = new java.util.ArrayList<>(scenes.subList(0, maxVideoScenes));
+            }
             
             // Extract timeline_events from context (from Editor Agent) as a fallback
             // for scene 0 only when the script did not provide per-scene events.
@@ -652,20 +659,20 @@ public class MediaOrchestrationService {
             request.setMusicUrl(musicUrl);
             request.setIntroTitle(missionLabel);
             request.setIntroSubtitle(resolveMissionSubtitle(missionId));
+            // Refinement 1: disable intro for immediate hook (0.0 sec visual+audio)
+            request.setEnableIntro(false);
             request.setResolution(runtimeSettings.getString(RuntimeSettings.KEY_VIDEO_RESOLUTION, "1920x1080"));
             request.setSceneMotion(runtimeSettings.getString(RuntimeSettings.KEY_VIDEO_SCENE_MOTION, "animated"));
 
-            // Per-run visual variety: rotate default transition, per-scene transitions,
-            // and the background pattern from a seed derived from the execution id.
+            // Per-run visual variety: rotate default transition and background pattern.
+            // Fix transitions bug: assign rotating transition directly per scene (Remotion expects scene.transition, not root sceneTransitions)
             int styleSeed = (executionId.hashCode() & Integer.MAX_VALUE);
             request.setTransition(ROTATION_TRANSITIONS.get(styleSeed % ROTATION_TRANSITIONS.size()));
             request.setBackgroundPattern(BACKGROUND_PATTERNS.get(styleSeed % BACKGROUND_PATTERNS.size()));
-            java.util.List<String> sceneTransitions = new java.util.ArrayList<>();
             for (int i = 0; i < scenes.size(); i++) {
                 int t = (styleSeed + i * 3) % ROTATION_TRANSITIONS.size();
-                sceneTransitions.add(ROTATION_TRANSITIONS.get(t));
+                scenes.get(i).setTransition(ROTATION_TRANSITIONS.get(t));
             }
-            request.setSceneTransitions(sceneTransitions);
             
             // Captions config (burn-in enabled by default for YouTube-ready output)
             VideoCaptionsConfig captionsConfig = new VideoCaptionsConfig();

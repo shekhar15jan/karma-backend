@@ -77,6 +77,8 @@ public final class VisualSpecNormalizer {
         normalizeLayout(spec);
         normalizeComponents(spec, mapper);
         normalizeConnections(spec);
+        normalizeAnimation(spec);
+        normalizeCode(spec);
     }
 
     private static void normalizeLayout(ObjectNode spec) {
@@ -193,6 +195,57 @@ public final class VisualSpecNormalizer {
         }
         if (!allowed.contains(v.asText())) {
             conn.remove(field);
+        }
+    }
+
+    private static final Set<String> HIGHLIGHT_STYLES = Set.of("glow", "ring");
+
+    private static void normalizeAnimation(ObjectNode spec) {
+        JsonNode animNode = spec.get("animation");
+        if (animNode == null || !animNode.isObject()) {
+            return;
+        }
+        ObjectNode anim = (ObjectNode) animNode;
+        JsonNode highlightsNode = anim.get("highlights");
+        if (highlightsNode == null || !highlightsNode.isArray()) {
+            return;
+        }
+        ArrayNode highlights = (ArrayNode) highlightsNode;
+        for (JsonNode hNode : highlights) {
+            if (hNode == null || !hNode.isObject()) continue;
+            ObjectNode h = (ObjectNode) hNode;
+            JsonNode styleNode = h.get("style");
+            if (styleNode != null && styleNode.isTextual()) {
+                String s = styleNode.asText().trim().toLowerCase(Locale.ROOT);
+                if (!HIGHLIGHT_STYLES.contains(s)) {
+                    // coerce invalid styles like "pulse", "highlight", "glow-ring" -> "glow"
+                    h.put("style", "glow");
+                } else {
+                    h.put("style", s);
+                }
+            } else if (styleNode != null && !styleNode.isNull() && !styleNode.isTextual()) {
+                h.remove("style");
+            }
+        }
+    }
+
+    private static void normalizeCode(ObjectNode spec) {
+        JsonNode codeNode = spec.get("code");
+        if (codeNode == null) {
+            return;
+        }
+        if (codeNode.isNull()) {
+            spec.remove("code");
+            return;
+        }
+        if (!codeNode.isObject()) {
+            spec.remove("code");
+            return;
+        }
+        // ensure code has at least an empty text if missing
+        ObjectNode code = (ObjectNode) codeNode;
+        if (!code.has("text") || code.get("text").isNull()) {
+            code.put("text", "");
         }
     }
 }

@@ -19,10 +19,14 @@ public class GroqProvider implements LLMProvider {
     private static final String API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     private static final List<String> MODELS = List.of(
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3-32b",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
+        "groq/compound-mini",
         "deepseek-r1-distill-llama-70b"
     );
 

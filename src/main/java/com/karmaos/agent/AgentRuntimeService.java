@@ -36,6 +36,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.karmaos.execution.Execution;
+import com.karmaos.execution.ExecutionRepository;
+import com.karmaos.execution.ExecutionStep;
+import com.karmaos.execution.ExecutionStepRepository;
 import com.karmaos.mcp.McpToolService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -96,6 +100,8 @@ public class AgentRuntimeService {
     private final RuntimeSettings runtimeSettings;
     private final LlmCacheRepository llmCacheRepository;
     private final McpToolService mcpToolService;
+    private final ExecutionRepository executionRepository;
+    private final ExecutionStepRepository stepRepository;
 
     public AgentRuntimeService(LLMProviderFactory providerFactory,
                                ProviderRepository providerRepository,
@@ -112,9 +118,11 @@ public class AgentRuntimeService {
                                WorkspaceRepository workspaceRepository,
                                KarmaMemoryService karmaMemoryService,
                                ObjectMapper objectMapper,
-                               RuntimeSettings runtimeSettings,
-                               LlmCacheRepository llmCacheRepository,
-                               McpToolService mcpToolService) {
+                                RuntimeSettings runtimeSettings,
+                                LlmCacheRepository llmCacheRepository,
+                                McpToolService mcpToolService,
+                                ExecutionRepository executionRepository,
+                                ExecutionStepRepository stepRepository) {
         this.providerFactory = providerFactory;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
@@ -133,6 +141,8 @@ public class AgentRuntimeService {
         this.runtimeSettings = runtimeSettings;
         this.llmCacheRepository = llmCacheRepository;
         this.mcpToolService = mcpToolService;
+        this.executionRepository = executionRepository;
+        this.stepRepository = stepRepository;
     }
 
     public ExecutionStep executeAgentStep(UUID executionId, UUID flowId, UUID agentId, int stepOrder,
@@ -255,8 +265,83 @@ public class AgentRuntimeService {
         int totalCompletion = 0;
         long totalLatency = 0L;
         int maxTokens = resolveMaxTokens(flow, agent, missionId);
+        int startChunk = 0;
+        // Resume: if this step already has partial progress (from per-chunk saves before a failure), load it
+        if (step.getOutputData() != null && step.getOutputData().contains("script_body")) {
+            try {
+                JsonNode existing = StrictJson.extractLastObject(step.getOutputData());
+                if (existing != null && existing.has("script_body") && existing.get("script_body").isArray()) {
+                    ArrayNode existingBody = (ArrayNode) existing.get("script_body");
+                    if (existingBody.size() > 0 && existingBody.size() <= totalScenes) {
+                        log.info("Resuming script from partial progress: {} scenes (chunk {}/{})", existingBody.size(), (existingBody.size() / scenesPerChunk) + 1, numChunks);
+                        for (JsonNode scene : existingBody) allScenes.add(scene);
+                        sceneCounter = existingBody.size();
+                        if (existing.hasNonNull("title")) title = existing.get("title").asText();
+                        for (JsonNode scene : existingBody) {
+                            String label = "";
+                            JsonNode spec = scene.hasNonNull("visual_spec") ? scene.get("visual_spec") : null;
+                            if (spec != null && spec.hasNonNull("title")) label = spec.get("title").asText();
+                            if (label.isBlank() && scene.hasNonNull("speaker_text")) {
+                                String st = scene.get("speaker_text").asText();
+                                label = st.length() > 90 ? st.substring(0, 90) : st;
+                            }
+                            if (!label.isBlank()) runningSummary.append(label).append(" | ");
+                        }
+                        if (runningSummary.length() > 0) runningSummary.append("\n");
+                        startChunk = (int) Math.ceil((double) sceneCounter / scenesPerChunk);
+                        if (startChunk >= numChunks) {
+                            log.info("Resume: already have all {} scenes, will re-validate", sceneCounter);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to load resume progress, starting from scratch: {}", e.getMessage());
+            }
+        }
+        // Also check previous FAILED step for same execution/stepOrder (retry after failure creates a new step row)
+        if (startChunk == 0 && (step.getOutputData() == null || !step.getOutputData().contains("script_body"))) {
+            try {
+                List<ExecutionStep> prevSteps = stepRepository.findByExecutionIdOrderByStepOrder(step.getExecutionId());
+                for (ExecutionStep ps : prevSteps) {
+                    if (ps.getStepOrder() == step.getStepOrder() && "FAILED".equals(ps.getStatus()) && ps.getOutputData() != null && ps.getOutputData().contains("script_body") && !ps.getId().equals(step.getId())) {
+                        JsonNode existing = StrictJson.extractLastObject(ps.getOutputData());
+                        if (existing != null && existing.has("script_body") && existing.get("script_body").isArray()) {
+                            ArrayNode existingBody = (ArrayNode) existing.get("script_body");
+                            if (existingBody.size() > 0 && existingBody.size() < totalScenes) {
+                                log.info("Resuming script from previous FAILED step {}: {} scenes (chunk {}/{})", ps.getId(), existingBody.size(), (existingBody.size() / scenesPerChunk) + 1, numChunks);
+                                for (JsonNode scene : existingBody) allScenes.add(scene);
+                                sceneCounter = existingBody.size();
+                                if (existing.hasNonNull("title")) title = existing.get("title").asText();
+                                for (JsonNode scene : existingBody) {
+                                    String label = "";
+                                    JsonNode spec = scene.hasNonNull("visual_spec") ? scene.get("visual_spec") : null;
+                                    if (spec != null && spec.hasNonNull("title")) label = spec.get("title").asText();
+                                    if (label.isBlank() && scene.hasNonNull("speaker_text")) {
+                                        String st = scene.get("speaker_text").asText();
+                                        label = st.length() > 90 ? st.substring(0, 90) : st;
+                                    }
+                                    if (!label.isBlank()) runningSummary.append(label).append(" | ");
+                                }
+                                if (runningSummary.length() > 0) runningSummary.append("\n");
+                                startChunk = (int) Math.ceil((double) sceneCounter / scenesPerChunk);
+                                break;
+                            } else if (existingBody.size() >= totalScenes) {
+                                log.info("Resume: previous FAILED step already has all {} scenes, will re-validate", existingBody.size());
+                                for (JsonNode scene : existingBody) allScenes.add(scene);
+                                sceneCounter = existingBody.size();
+                                if (existing.hasNonNull("title")) title = existing.get("title").asText();
+                                startChunk = numChunks;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to load previous failed step progress: {}", e.getMessage());
+            }
+        }
 
-        for (int i = 0; i < chunks.size(); i++) {
+        for (int i = startChunk; i < chunks.size(); i++) {
             boolean isFirst = i == 0;
             boolean isLast = i == chunks.size() - 1;
             int scenesThisChunk = isLast ? Math.max(1, totalScenes - sceneCounter) : scenesPerChunk;
@@ -300,6 +385,19 @@ public class AgentRuntimeService {
             appendRunningSummary(runningSummary, body);
             log.info("Script chunk {}/{} produced {} scenes (total {})",
                     i + 1, chunks.size(), body.size(), sceneCounter);
+            // Persist incremental progress for resume (so a FAILED at 13/14 can resume at 14 without re-running 13)
+            try {
+                ObjectNode progNode = objectMapper.createObjectNode();
+                progNode.put("title", title != null ? title : "Untitled");
+                progNode.set("script_body", allScenes);
+                String progJson = objectMapper.writeValueAsString(progNode);
+                step.setOutputData(progJson);
+                step.setTotalTokens(totalPrompt + totalCompletion);
+                step.setLatencyMs((int) totalLatency);
+                executionService.saveStep(step.getExecutionId(), step);
+            } catch (Exception e) {
+                log.warn("Failed to persist script chunk progress {}/{}: {}", i + 1, chunks.size(), e.getMessage());
+            }
         }
 
         ObjectNode merged = objectMapper.createObjectNode();
@@ -629,17 +727,36 @@ public class AgentRuntimeService {
         LLMResponse lastResponse = null;
         String correctiveHint = "";
 
-        Provider[] chain;
         Provider fallback = agent != null && agent.getFallbackProviderId() != null
             ? providerRepository.findById(agent.getFallbackProviderId()).orElse(null)
             : null;
-        if (primaryProvider != null && fallback != null && !primaryProvider.getId().equals(fallback.getId())) {
-            chain = new Provider[] { primaryProvider, fallback };
-        } else if (primaryProvider != null) {
-            chain = new Provider[] { primaryProvider };
-        } else {
-            chain = new Provider[0];
+        // Build chain: primary → fallback → all other CONNECTED LLM providers (to avoid single-provider 500/429/413)
+        List<Provider> chainList = new ArrayList<>();
+        Set<UUID> seen = new HashSet<>();
+        if (primaryProvider != null) {
+            chainList.add(primaryProvider);
+            seen.add(primaryProvider.getId());
         }
+        if (fallback != null && !seen.contains(fallback.getId())) {
+            chainList.add(fallback);
+            seen.add(fallback.getId());
+        }
+        try {
+            List<Provider> allConnected = providerRepository.findByStatus("CONNECTED").stream()
+                    .filter(p -> p.getDeletedAt() == null)
+                    .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
+                    .filter(p -> isLlmProvider(p.getProviderType()))
+                    .filter(p -> !seen.contains(p.getId()))
+                    .filter(p -> {
+                        try { return !providerKeyCipher.decrypt(p.getEncryptedApiKey()).isBlank(); } catch (Exception e) { return false; }
+                    })
+                    .sorted(Comparator.comparing(Provider::getName, String.CASE_INSENSITIVE_ORDER))
+                    .toList();
+            chainList.addAll(allConnected);
+        } catch (Exception e) {
+            log.debug("Failed to build extended provider chain: {}", e.getMessage());
+        }
+        Provider[] chain = chainList.toArray(new Provider[0]);
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             for (Provider provider : chain) {
@@ -968,8 +1085,10 @@ public class AgentRuntimeService {
             }
             String type = comp.hasNonNull("type") ? comp.get("type").asText() : null;
             if (type == null || !ALLOWED_COMPONENT_TYPES.contains(type)) {
-                log.info("Script output rejected: unknown component type \"{}\"", type);
-                return false;
+                log.warn("Coercing unknown component type \"{}\" to \"card\" in layout \"{}\"", type, layout);
+                if (comp instanceof ObjectNode) {
+                    ((ObjectNode) comp).put("type", "card");
+                }
             }
         }
         int n = comps.size();
@@ -983,54 +1102,82 @@ public class AgentRuntimeService {
                     }
                 }
                 if (!hasCode) {
-                    log.info("Script output rejected: code-explainer requires a \"code\" component");
-                    return false;
+                    log.warn("Coercing code-explainer without code — injecting placeholder code component");
+                    if (comps instanceof ArrayNode) {
+                        ObjectNode placeholder = objectMapper.createObjectNode();
+                        placeholder.put("id", "auto-code-" + System.nanoTime());
+                        placeholder.put("type", "code");
+                        placeholder.put("label", "Example");
+                        ((ArrayNode) comps).add(placeholder);
+                        n = comps.size();
+                    } else {
+                        log.info("Script output rejected: code-explainer requires a \"code\" component");
+                        return false;
+                    }
                 }
                 break;
             }
             case "architecture-diagram": {
                 JsonNode conns = spec.get("connections");
                 if (conns == null || !conns.isArray() || conns.size() == 0) {
-                    log.info("Script output rejected: architecture-diagram requires a non-empty \"connections\" array");
-                    return false;
+                    log.warn("Coercing architecture-diagram without connections — injecting default connection");
+                    if (spec instanceof ObjectNode && comps instanceof ArrayNode && comps.size() >= 2) {
+                        String from = comps.get(0).path("id").asText("a");
+                        String to = comps.get(1).path("id").asText("b");
+                        ArrayNode arr = objectMapper.createArrayNode();
+                        ObjectNode c = objectMapper.createObjectNode();
+                        c.put("from", from);
+                        c.put("to", to);
+                        arr.add(c);
+                        ((ObjectNode) spec).set("connections", arr);
+                    } else {
+                        log.info("Script output rejected: architecture-diagram requires a non-empty \"connections\" array");
+                        return false;
+                    }
                 }
                 break;
             }
             case "roadmap-timeline":
                 if (n > 5) {
-                    log.info("Script output rejected: roadmap-timeline exceeds 5 steps");
-                    return false;
+                    log.warn("Coercing roadmap-timeline from {} to 5 steps", n);
+                    if (comps instanceof ArrayNode) {
+                        while (comps.size() > 5) ((ArrayNode) comps).remove(5);
+                        n = comps.size();
+                    } else {
+                        log.info("Script output rejected: roadmap-timeline exceeds 5 steps");
+                        return false;
+                    }
                 }
                 break;
             case "feature-grid":
                 if (n > 8) {
-                    log.info("Script output rejected: feature-grid exceeds 8 components");
-                    return false;
+                    log.warn("Coercing feature-grid from {} to 8 components", n);
+                    if (comps instanceof ArrayNode) { while (comps.size() > 8) ((ArrayNode) comps).remove(8); } else return false;
                 }
                 break;
             case "big-number":
-                if (n > 4) {
-                    log.info("Script output rejected: big-number exceeds 4 components");
-                    return false;
+                if (n > 6) {
+                    log.warn("Coercing big-number from {} to 6 components", n);
+                    if (comps instanceof ArrayNode) { while (comps.size() > 6) ((ArrayNode) comps).remove(6); } else return false;
                 }
                 break;
             case "terminal-walkthrough":
                 if (n > 10) {
-                    log.info("Script output rejected: terminal-walkthrough exceeds 10 commands");
-                    return false;
+                    log.warn("Coercing terminal-walkthrough from {} to 10", n);
+                    if (comps instanceof ArrayNode) { while (comps.size() > 10) ((ArrayNode) comps).remove(10); } else return false;
                 }
                 break;
             case "bento":
             case "dashboard":
                 if (n > 12) {
-                    log.info("Script output rejected: {} exceeds 12 components", layout);
-                    return false;
+                    log.warn("Coercing {} from {} to 12 components", layout, n);
+                    if (comps instanceof ArrayNode) { while (comps.size() > 12) ((ArrayNode) comps).remove(12); } else return false;
                 }
                 break;
             case "infographic":
                 if (n > 16) {
-                    log.info("Script output rejected: infographic exceeds 16 components");
-                    return false;
+                    log.warn("Coercing infographic from {} to 16", n);
+                    if (comps instanceof ArrayNode) { while (comps.size() > 16) ((ArrayNode) comps).remove(16); } else return false;
                 }
                 break;
             default:
@@ -1039,7 +1186,7 @@ public class AgentRuntimeService {
         return true;
     }
 
-    private boolean isOutputValidFor(Agent agent, String content) {
+    public boolean isOutputValidFor(Agent agent, String content) {
         if (!StepContextDistiller.isValidOutput(content)) {
             return false;
         }
@@ -1296,6 +1443,22 @@ public class AgentRuntimeService {
 
     private String resolveModel(Agent agent, Provider provider, LLMProvider llmProvider) {
         String configured = configuredModel(agent);
+        // Provider-aware: only use configured model if it belongs to the current provider's catalog;
+        // otherwise the fallback provider would send an incompatible model name (e.g. nemotron to Gemini → 404).
+        if (configured != null && !configured.isBlank() && provider != null
+                && provider.getModels() != null && !provider.getModels().isBlank()) {
+            try {
+                List<String> models = objectMapper.readValue(provider.getModels(), new TypeReference<List<String>>() {});
+                if (models != null && !models.isEmpty()) {
+                    boolean belongs = models.stream().anyMatch(m -> m.equalsIgnoreCase(configured));
+                    if (belongs) return configured;
+                    // configured belongs to a different provider → use this provider's default
+                    return models.get(0);
+                }
+            } catch (Exception ignored) {}
+            // provider has no parseable catalog — still prefer configured only if provider type matches
+            return configured;
+        }
         if (configured != null && !configured.isBlank()) {
             return configured;
         }

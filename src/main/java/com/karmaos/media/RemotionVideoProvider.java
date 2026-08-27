@@ -156,7 +156,9 @@ public class RemotionVideoProvider implements VideoProvider {
         if (request.getBackgroundPattern() != null && !request.getBackgroundPattern().isBlank()) {
             body.put("backgroundPattern", request.getBackgroundPattern());
         }
-        body.put("enableIntro", true);
+        // Refinement 1: immediate hook — disable intro when enableIntro==false (0.0 sec visual+audio)
+        boolean enableIntro = request.getEnableIntro() == null || request.getEnableIntro();
+        body.put("enableIntro", enableIntro);
         if (request.getIntroTitle() != null && !request.getIntroTitle().isBlank()) {
             body.put("introTitle", request.getIntroTitle());
         }
@@ -195,12 +197,13 @@ public class RemotionVideoProvider implements VideoProvider {
 
         ArrayNode scenes = objectMapper.createArrayNode();
         List<VideoScene> sceneList = request.getScenes() != null ? request.getScenes() : List.of();
-        List<String> sceneTransitions = request.getSceneTransitions() != null ? request.getSceneTransitions() : List.of();
         for (int si = 0; si < sceneList.size(); si++) {
             VideoScene scene = sceneList.get(si);
             ObjectNode sceneNode = objectMapper.createObjectNode();
-            if (si < sceneTransitions.size() && sceneTransitions.get(si) != null && !sceneTransitions.get(si).isBlank()) {
-                sceneNode.put("transition", sceneTransitions.get(si));
+            // Per-scene transition (fixed: was incorrectly read from root sceneTransitions, now from scene.transition)
+            String perSceneTransition = scene.getTransition();
+            if (perSceneTransition != null && !perSceneTransition.isBlank()) {
+                sceneNode.put("transition", perSceneTransition);
             }
             ObjectNode visualSpec = parseSpec(scene.getSpec());
             if (visualSpec == null && scene.getImageUrl() != null && !scene.getImageUrl().isBlank()) {
