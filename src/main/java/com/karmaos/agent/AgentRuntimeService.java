@@ -594,16 +594,53 @@ public class AgentRuntimeService {
                 return false;
             }
             for (JsonNode scene : body) {
-                JsonNode spec = scene != null && scene.hasNonNull("visual_spec")
-                        ? scene.get("visual_spec") : (scene != null ? scene.get("diagram_spec") : null);
+                // V2: visual_spec_v2 or semantic fields at scene level (objects/events/visualIntent)
+                JsonNode spec = null;
+                if (scene != null && scene.hasNonNull("visual_spec_v2") && scene.get("visual_spec_v2").isObject()) {
+                    spec = scene.get("visual_spec_v2");
+                } else if (scene != null && scene.hasNonNull("visual_spec") && scene.get("visual_spec").isObject()) {
+                    spec = scene.get("visual_spec");
+                    // If scene also has V2 top-level fields, consider them as part of spec (merged in MediaOrchestrationService)
+                    // For validation, check if visual_spec has V2 semantic fields inside
+                    if (scene.has("objects") || scene.has("events") || scene.has("visualIntent")) {
+                        // V2 semantic at scene level — treat as valid if objects/events present
+                        JsonNode objs = scene.get("objects");
+                        JsonNode evts = scene.get("events");
+                        if ((objs != null && objs.isArray() && objs.size() > 0) || (evts != null && evts.isArray() && evts.size() > 0)) {
+                            if (!scene.hasNonNull("speaker_text") || scene.get("speaker_text").asText().isBlank()) return false;
+                            continue;
+                        }
+                    }
+                } else if (scene != null && scene.hasNonNull("diagram_spec") && scene.get("diagram_spec").isObject()) {
+                    spec = scene.get("diagram_spec");
+                }
+                // Also allow pure V2 scene without visual_spec (objects/events directly)
+                if (spec == null && scene != null && (scene.has("objects") || scene.has("events"))) {
+                    JsonNode objs = scene.get("objects");
+                    JsonNode evts = scene.get("events");
+                    if ((objs != null && objs.isArray() && objs.size() > 0) || (evts != null && evts.isArray() && evts.size() > 0)) {
+                        if (!scene.hasNonNull("speaker_text") && !scene.hasNonNull("narration")) return false;
+                        continue;
+                    }
+                    return false;
+                }
                 if (spec == null || !spec.isObject()) {
                     return false;
                 }
+                // For V2 spec, check semanticObjects/objects or components
                 JsonNode comps = spec.has("components") ? spec.get("components") : spec.get("shapes");
-                if (comps == null || !comps.isArray() || comps.size() == 0) {
+                JsonNode semObjs = spec.has("semanticObjects") ? spec.get("semanticObjects") : spec.get("objects");
+                JsonNode semEvents = spec.has("semanticAnimations") ? spec.get("semanticAnimations") : spec.get("events");
+                boolean hasLegacy = comps != null && comps.isArray() && comps.size() > 0;
+                boolean hasV2 = (semObjs != null && semObjs.isArray() && semObjs.size() > 0) || (semEvents != null && semEvents.isArray() && semEvents.size() > 0) || spec.has("visualIntent") || spec.has("intent");
+                if (!hasLegacy && !hasV2) {
                     return false;
                 }
-                if (!scene.hasNonNull("speaker_text") || scene.get("speaker_text").asText().isBlank()) {
+                if (!scene.hasNonNull("speaker_text") && !scene.hasNonNull("narration")) {
+                    // V2 may use narration.text
+                    JsonNode nar = scene.get("narration");
+                    if (nar == null || !nar.hasNonNull("text") || nar.get("text").asText().isBlank()) return false;
+                } else if (scene.hasNonNull("speaker_text") && scene.get("speaker_text").asText().isBlank()) {
                     return false;
                 }
             }
@@ -620,24 +657,26 @@ public class AgentRuntimeService {
         appendPromptBase(sb, agent, flow, missionId);
         sb.append("\n\nOUTPUT FORMAT REQUIREMENT (MANDATORY):\n")
           .append("You are writing ONE CHUNK of a larger video script. Respond with a single valid JSON object ")
-          .append("(no markdown fences, no preamble, no commentary). The JSON schema, per-scene visual spec, allowed layouts, ")
-          .append("themes, and component vocabulary are defined by the behavioral contract of your assigned skill ")
-          .append("(\"Video Script Generator\"). Every scene MUST carry the skill's per-scene visual_spec object with a ")
-          .append("non-empty components array; each component needs a unique \"id\".\n")
+          .append("(no markdown fences, no preamble). The per-scene visual_spec vocabulary is defined by your skill ")
+          .append("(\"Video Script Generator\"), but you MUST now think in NARRATIVE BEATS, not sentences:\n")
+          .append("- Each scene = one narrative beat with a clear visual intent (HOOK, EXPLAIN, ARCHITECTURE, CODE, SIMULATION, etc).\n")
+          .append("- For each scene, provide: sceneId (kebab-case), narration {text}, visualIntent (e.g. REQUEST_INITIATION, ARCHITECTURE, CODE), ")
+          .append("objects [{id,type}], events [{type:CREATE|TRAVEL|PUBLISH|HIGHLIGHT|FAIL, target, from, to, at}].\n")
+          .append("- Also include the legacy visual_spec {layout,theme,title,components[],connections[],animation} — it remains the render contract; ")
+          .append("  seed it from your objects/events (e.g., TRAVEL from mobile-app to api-gateway → connection).\n")
+          .append("- Duration is VARIABLE: base on narration length + information density + visual complexity + animation needs, not a fixed 5-10s. ")
+          .append("  Hook may be 3-5s, deep EXPLAIN may be 15-22s.\n")
           .append("This chunk covers scenes ").append(startSceneNumber).append(" to ")
           .append(startSceneNumber + scenesThisChunk - 1).append(" of the full script. Write EXACTLY ")
           .append(scenesThisChunk).append(" scenes. ")
           .append(isFirst
-                ? "This is the OPENING chunk: scene " + startSceneNumber + " MUST be the hook that poses a concrete problem in 5-10 seconds. "
+                ? "This is the OPENING chunk: scene " + startSceneNumber + " MUST be the hook that poses a concrete problem. "
                 : "")
           .append(isLast
                 ? "This is the FINAL chunk: end with a strong summary that counts what was solved (e.g. TODAY WE SOLVED 5 PROBLEMS: 01 ... 02 ...) and a call to action. "
                 : "")
-          .append("Each speaker_text must be SHORT: 1-2 sentences of about 12-20 words (spoken in 5-10 seconds). ")
-          .append("Use the raw content below as your material; do not invent facts that contradict it. ")
-          .append("STRICT CONTENT SAFETY RULES: family-friendly, age-appropriate. ABSOLUTELY FORBIDDEN: violence, fighting, ")
-          .append("war, weapons, guns, blood, gore, injury, death, killing, fear, horror, nudity, adult/sexual content, ")
-          .append("drugs, alcohol, smoking, or anything inappropriate.\n")
+          .append("Use the raw content below as material; do not invent facts contradicting it. ")
+          .append("STRICT CONTENT SAFETY RULES: family-friendly. ABSOLUTELY FORBIDDEN: violence, war, weapons, blood, gore, nudity, adult/sexual, drugs, alcohol.\n")
           .append("REPEAT: Output ONLY the raw JSON object with the requested ").append(scenesThisChunk)
           .append(" scenes. No markdown, no prose outside the JSON.");
         return sb.toString();
@@ -1066,6 +1105,9 @@ public class AgentRuntimeService {
      * - per-layout cardinality/requirement rules
      */
     private boolean isSpecCompliant(JsonNode spec) {
+        // V2: if semantic, skip V1 strict checks — V2 has its own validation via semanticAnimations/objects
+        if (spec.has("schemaVersion") && "v2".equals(spec.path("schemaVersion").asText())) return true;
+        if (spec.has("visualIntent") || spec.has("semanticObjects") || spec.has("semanticAnimations")) return true;
         JsonNode layoutNode = spec.get("layout");
         String layout = "";
         if (layoutNode != null && layoutNode.isTextual()) {
@@ -1077,6 +1119,8 @@ public class AgentRuntimeService {
         }
         JsonNode comps = spec.get("components");
         if (comps == null || !comps.isArray()) {
+            // V2 without legacy components but with semantic objects is compliant
+            if (spec.has("semanticObjects") || spec.has("objects")) return true;
             return false;
         }
         for (JsonNode comp : comps) {
@@ -1207,17 +1251,38 @@ public class AgentRuntimeService {
                     return false;
                 }
                 for (JsonNode scene : body) {
-                    JsonNode spec = scene != null
-                        ? (scene.hasNonNull("visual_spec") ? scene.get("visual_spec") : scene.get("diagram_spec"))
-                        : null;
+                    JsonNode spec = null;
+                    // V2: visual_spec_v2 first
+                    if (scene != null && scene.hasNonNull("visual_spec_v2") && scene.get("visual_spec_v2").isObject()) {
+                        spec = scene.get("visual_spec_v2");
+                    } else if (scene != null && scene.hasNonNull("visual_spec") && scene.get("visual_spec").isObject()) {
+                        spec = scene.get("visual_spec");
+                        // If scene has V2 top-level semantic fields, treat as V2 (merged)
+                        if (scene.has("objects") || scene.has("events") || scene.has("visualIntent")) {
+                            JsonNode objs = scene.get("objects");
+                            JsonNode evts = scene.get("events");
+                            if ((objs != null && objs.isArray() && objs.size() > 0) || (evts != null && evts.isArray() && evts.size() > 0) || scene.has("visualIntent")) {
+                                continue; // V2 semantic at scene level valid
+                            }
+                        }
+                    } else if (scene != null && scene.hasNonNull("diagram_spec") && scene.get("diagram_spec").isObject()) {
+                        spec = scene.get("diagram_spec");
+                    } else if (scene != null && (scene.has("objects") || scene.has("events"))) {
+                        // Pure V2 without visual_spec
+                        JsonNode objs = scene.get("objects");
+                        JsonNode evts = scene.get("events");
+                        if ((objs != null && objs.isArray() && objs.size() > 0) || (evts != null && evts.isArray() && evts.size() > 0)) continue;
+                        return false;
+                    }
                     if (spec == null || !spec.isObject()) {
                         return false;
                     }
                     JsonNode shapes = spec.has("components") ? spec.get("components") : spec.get("shapes");
+                    JsonNode semObjs = spec.has("semanticObjects") ? spec.get("semanticObjects") : spec.get("objects");
                     JsonNode blocks = spec.get("content_blocks");
-
+                    boolean hasV2 = (semObjs != null && semObjs.isArray() && semObjs.size() > 0) || spec.has("visualIntent") || spec.has("intent") || (spec.has("semanticAnimations") || spec.has("events"));
                     if ((shapes == null || !shapes.isArray() || shapes.size() == 0) &&
-                        (blocks == null || !blocks.isArray() || blocks.size() == 0)) {
+                        (blocks == null || !blocks.isArray() || blocks.size() == 0) && !hasV2) {
                         return false;
                     }
                     if (shapes != null && shapes.isArray()) {

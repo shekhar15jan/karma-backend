@@ -42,6 +42,7 @@ public class ImageProviderFactory {
         return switch (providerType.toLowerCase()) {
             case "google", "gemini" -> new GoogleImageProvider(apiKey, webClientBuilder, objectMapper);
             case "cloudflare" -> new CloudflareWorkersAIImageProvider(apiKey, extractAccountId(apiEndpoint), webClientBuilder);
+            case "openai", "openai-image", "dall-e", "gpt-image" -> new OpenAIVisualProvider(apiKey, webClientBuilder, objectMapper);
             case "diagram", "diagram-image" -> new DiagramImageProvider();
             default -> {
                 log.warn("Unsupported image provider type: {}, using mock", providerType);

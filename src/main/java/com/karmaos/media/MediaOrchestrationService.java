@@ -22,6 +22,7 @@ import com.karmaos.publication.Publication;
 import com.karmaos.publishing.PublishRequest;
 import com.karmaos.publishing.PublishingService;
 import com.karmaos.settings.RuntimeSettings;
+import com.karmaos.visual.VisualDirectorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -71,6 +72,7 @@ public class MediaOrchestrationService {
     private final ExecutionStepRepository executionStepRepository;
     private final ExecutionRepository executionRepository;
     private final AgentSkillRepository agentSkillRepository;
+    private final VisualDirectorService visualDirectorService;
 
     public MediaOrchestrationService(ImageProviderFactory imageProviderFactory,
                                       VoiceProviderFactory voiceProviderFactory,
@@ -88,7 +90,8 @@ public class MediaOrchestrationService {
                                       MissionRepository missionRepository,
                                       ExecutionStepRepository executionStepRepository,
                                       ExecutionRepository executionRepository,
-                                      AgentSkillRepository agentSkillRepository) {
+                                      AgentSkillRepository agentSkillRepository,
+                                      VisualDirectorService visualDirectorService) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
         this.videoProviderFactory = videoProviderFactory;
@@ -106,6 +109,7 @@ public class MediaOrchestrationService {
         this.executionStepRepository = executionStepRepository;
         this.executionRepository = executionRepository;
         this.agentSkillRepository = agentSkillRepository;
+        this.visualDirectorService = visualDirectorService;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
@@ -627,6 +631,12 @@ public class MediaOrchestrationService {
 
             // Remotion is the only supported video provider
             List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages);
+            // Production Wiring: V2 Visual Director — enrich with semantic intent (preserves V1)
+            String renderingMode = runtimeSettings.getString(com.karmaos.visual.VisualDirectorService.KEY_VIDEO_RENDERING_MODE, "V1");
+            if ("V2".equalsIgnoreCase(renderingMode)) {
+                visualDirectorService.enrichVideoScenes(scenes);
+                log.info("V2 rendering mode enabled — enriched {} scenes with semantic intent", scenes.size());
+            }
             applyMissionTheme(scenes, missionId, executionId);
             if (scenes.isEmpty()) {
                 step.setStatus("FAILED");
@@ -832,10 +842,41 @@ public class MediaOrchestrationService {
                 com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
                 if (body != null && body.isArray()) {
                     for (com.fasterxml.jackson.databind.JsonNode section : body) {
-                        if (section.hasNonNull("visual_spec") && section.get("visual_spec").isObject()) {
-                            specJsons.add(section.get("visual_spec").toString());
+                        // V2 versioned structure: visual_spec_v2 or semantic fields at scene level
+                        if (section.hasNonNull("visual_spec_v2") && section.get("visual_spec_v2").isObject()) {
+                            // Explicit V2 spec — preserve as-is with schemaVersion
+                            com.fasterxml.jackson.databind.node.ObjectNode v2 = (com.fasterxml.jackson.databind.node.ObjectNode) section.get("visual_spec_v2").deepCopy();
+                            if (!v2.has("schemaVersion")) v2.put("schemaVersion", "v2");
+                            specJsons.add(v2.toString());
+                        } else if (section.hasNonNull("visual_spec") && section.get("visual_spec").isObject()) {
+                            // V1 visual_spec — check if scene also has V2 semantic fields at top level (objects/events/visualIntent)
+                            com.fasterxml.jackson.databind.node.ObjectNode vs = (com.fasterxml.jackson.databind.node.ObjectNode) section.get("visual_spec").deepCopy();
+                            // Merge V2 semantic fields if present at scene level (objects, events, visualIntent, sceneId)
+                            if (section.has("objects") && section.get("objects").isArray()) vs.set("semanticObjects", section.get("objects"));
+                            if (section.has("events") && section.get("events").isArray()) vs.set("semanticAnimations", section.get("events"));
+                            if (section.hasNonNull("visualIntent")) vs.set("visualIntent", section.get("visualIntent"));
+                            if (section.hasNonNull("sceneId")) vs.set("sceneId", section.get("sceneId"));
+                            if (section.has("narration") && section.get("narration").isObject() && section.get("narration").has("text")) {
+                                // keep narration for reference
+                                vs.set("narration", section.get("narration"));
+                            }
+                            // Mark as V2 if semantic fields were merged
+                            if (vs.has("semanticObjects") || vs.has("visualIntent")) vs.put("schemaVersion", "v2");
+                            specJsons.add(vs.toString());
                         } else if (section.hasNonNull("diagram_spec") && section.get("diagram_spec").isObject()) {
                             specJsons.add(section.get("diagram_spec").toString());
+                        } else if (section.has("objects") || section.has("events") || section.has("visualIntent")) {
+                            // Pure V2 scene without legacy visual_spec — create minimal V2 spec from semantic fields
+                            com.fasterxml.jackson.databind.node.ObjectNode v2 = objectMapper.createObjectNode();
+                            v2.put("schemaVersion", "v2");
+                            v2.put("layout", "architecture-diagram");
+                            if (section.has("objects")) v2.set("semanticObjects", section.get("objects"));
+                            if (section.has("events")) v2.set("semanticAnimations", section.get("events"));
+                            if (section.has("visualIntent")) v2.set("visualIntent", section.get("visualIntent"));
+                            if (section.has("sceneId")) v2.set("sceneId", section.get("sceneId"));
+                            // Also copy narration text to title for fallback
+                            if (section.has("narration") && section.get("narration").has("text")) v2.put("title", section.get("narration").get("text").asText().substring(0, Math.min(40, section.get("narration").get("text").asText().length())));
+                            specJsons.add(v2.toString());
                         } else {
                             specJsons.add(null);
                         }

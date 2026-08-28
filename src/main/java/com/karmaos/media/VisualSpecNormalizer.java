@@ -17,14 +17,15 @@ import java.util.Set;
  */
 public final class VisualSpecNormalizer {
 
-    /** Layouts the karma-renderer video path actually implements. */
+    /** Layouts the karma-renderer video path actually implements (V2 16 + legacy). */
     private static final Set<String> LAYOUTS = Set.of(
         "title-slide", "section-header", "standard-content", "two-column", "split-image",
         "architecture-diagram", "feature-grid", "big-number", "comparison", "quote",
-        "code-explainer", "terminal-walkthrough", "roadmap-timeline"
+        "code-explainer", "terminal-walkthrough", "roadmap-timeline",
+        "bento", "dashboard", "infographic"
     );
 
-    /** Legacy / unimplemented layouts coerced to a safe implemented layout. */
+    /** Legacy layouts coerced via semantic fallback — preserves nodes/relationships, records diagnostics. */
     private static final Map<String, String> LAYOUT_FALLBACKS = Map.ofEntries(
         Map.entry("flow", "architecture-diagram"),
         Map.entry("flowchart", "architecture-diagram"),
@@ -34,26 +35,29 @@ public final class VisualSpecNormalizer {
         Map.entry("presentation", "standard-content"),
         Map.entry("split_diagram_text", "two-column"),
         Map.entry("cards", "feature-grid"),
-        Map.entry("bento", "feature-grid"),
         Map.entry("columns", "feature-grid"),
-        Map.entry("dashboard", "feature-grid"),
         Map.entry("grid", "feature-grid"),
         Map.entry("timeline", "roadmap-timeline"),
         Map.entry("roadmap", "roadmap-timeline"),
         Map.entry("learning_path", "roadmap-timeline"),
         Map.entry("sprint", "roadmap-timeline"),
         Map.entry("hero", "title-slide"),
-        Map.entry("poster", "title-slide"),
-        Map.entry("infographic", "standard-content")
+        Map.entry("poster", "title-slide")
     );
 
-    /** Component vocabulary the video renderer supports. */
+    /** Component vocabulary the video renderer supports (expanded V2). */
     private static final Set<String> COMPONENT_TYPES = Set.of(
         "heading", "paragraph", "text", "bullet-list", "code", "command",
-        "card", "info-card", "warning-card", "stat-card", "quote-card",
-        "bar-chart", "donut-chart", "progress-bar", "profile-card",
+        "card", "info-card", "warning-card", "stat-card", "quote-card", "comparison",
+        "bar-chart", "donut-chart", "progress-bar", "profile-card", "gauge", "radar", "pie-chart", "line-chart",
+        "container", "glass-container", "gradient-container", "shadow-container", "outlined-container", "modern-card", "minimal-card",
+        "banner", "pill-card", "badge-card", "pillar", "timeline", "horizontal-timeline", "roadmap", "learning-path", "sprint",
         "microservice-node", "api-gateway", "message-queue", "docker-node", "kubernetes-node",
-        "logging-node", "browser-node", "aws-node", "azure-node", "gcp-node", "language-node"
+        "logging-node", "browser-node", "aws-node", "azure-node", "gcp-node", "language-node",
+        "uml-class-node", "uml-actor-node", "uml-usecase-node", "uml-lifeline", "uml-arrow", "uml-decision", "uml-component",
+        "uml-package", "uml-database", "uml-note", "uml-cloud", "uml-deployment", "uml-interface", "uml-syncbar",
+        "flow-terminal", "flow-process", "flow-io", "flow-document", "flow-diagram",
+        "connector", "split-layout", "architecture-pipeline", "grid", "table"
     );
 
     /** Connection styles the renderer's zod schema accepts. Anything else would 400 the whole video. */
@@ -87,18 +91,35 @@ public final class VisualSpecNormalizer {
             ? layoutNode.asText().trim().toLowerCase(Locale.ROOT)
             : "";
         String layout;
+        String reason = null;
+        String originalType = raw;
         if (LAYOUTS.contains(raw)) {
             layout = raw;
         } else {
             String fallback = LAYOUT_FALLBACKS.get(raw);
             if (fallback != null) {
                 layout = fallback;
+                reason = "Legacy layout mapped via semantic fallback — nodes/relationships preserved";
             } else {
                 String kebab = raw.replace('_', '-');
-                layout = LAYOUTS.contains(kebab) ? kebab : "standard-content";
+                if (LAYOUTS.contains(kebab)) {
+                    layout = kebab;
+                } else {
+                    layout = "standard-content";
+                    reason = "Unsupported layout preserved via fallback";
+                }
             }
         }
         spec.put("layout", layout);
+        // §7 diagnostics: record why, do not silently overwrite
+        if (reason != null && !originalType.isBlank()) {
+            ArrayNode diag = spec.has("_diagnostics") && spec.get("_diagnostics").isArray()
+                ? (ArrayNode) spec.get("_diagnostics") : spec.putArray("_diagnostics");
+            ObjectNode entry = diag.addObject();
+            entry.put("originalType", originalType);
+            entry.put("normalizedType", layout);
+            entry.put("reason", reason);
+        }
     }
 
     private static void normalizeComponents(ObjectNode spec, ObjectMapper mapper) {
@@ -124,7 +145,32 @@ public final class VisualSpecNormalizer {
             ObjectNode comp = (ObjectNode) raw;
             String type = comp.hasNonNull("type") ? comp.get("type").asText() : "";
             if (!COMPONENT_TYPES.contains(type)) {
-                comp.put("type", "card");
+                // §7 preserve intent: keep original type, add diagnostic, fallback to card only if truly unknown
+                // but record reason so renderer can attempt semantic fallback (V2 AST)
+                String originalType = type;
+                // Try kebab normalization before destroying
+                String kebab = type.toLowerCase(Locale.ROOT).replace('_', '-');
+                if (COMPONENT_TYPES.contains(kebab)) {
+                    comp.put("type", kebab);
+                } else if (type.isBlank()) {
+                    comp.put("type", "card");
+                } else {
+                    // Preserve semantic type for Diagram AST path, do not coerce to card silently
+                    // Still ensure renderer fallback: keep original but add _originalType diagnostics
+                    if (!comp.has("_originalType")) comp.put("_originalType", originalType);
+                    // Keep renderer from 400: only coerce if not in expanded V2 vocabulary
+                    // If hard unknown, fallback but diagnostic preserved
+                    if (!originalType.contains("-") && !originalType.contains("_")) {
+                        // truly unknown single word → card fallback but with trace
+                        comp.put("type", "card");
+                        ArrayNode diag = spec.has("_diagnostics") && spec.get("_diagnostics").isArray()
+                            ? (ArrayNode) spec.get("_diagnostics") : spec.putArray("_diagnostics");
+                        ObjectNode entry = diag.addObject();
+                        entry.put("originalType", originalType);
+                        entry.put("normalizedType", "card");
+                        entry.put("reason", "Unsupported component coerced to card — preserve relationships");
+                    }
+                }
             }
             sanitizeHexColor(comp, "fill");
             sanitizeHexColor(comp, "line");
