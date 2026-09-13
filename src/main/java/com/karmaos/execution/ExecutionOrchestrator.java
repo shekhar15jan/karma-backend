@@ -42,6 +42,8 @@ public class ExecutionOrchestrator {
 
     public static final int MAX_STEP_RETRIES = 3;
     public static final int MAX_FLOW_RESTARTS = 3;
+    /** Maximum times the quality loop can re-run a step before proceeding (prevents infinite spin). */
+    public static final int MAX_QUALITY_LOOPS = 2;
     public static final String MODE_AUTO = "AUTO";
     public static final String MODE_REVIEW = "REVIEW";
 
@@ -434,15 +436,31 @@ public class ExecutionOrchestrator {
                 }
                 previousOutput = step.getOutputData();
                 
-                // AUTOMATED QUALITY LOOP
+                // AUTOMATED QUALITY LOOP — guarded against infinite spin
                 if (previousOutput != null && previousOutput.contains("\"revise_and_resubmit\"")) {
-                    log.info("Automated Critic requested revision. Restarting from previous steps with feedback.");
+                    log.info("Automated Critic requested revision. Restarting from previous step with feedback.");
                     emitExecutionEvent(executionId, "execution.quality_loop", "{\"message\":\"Quality scores below threshold, auto-reprompting\"}");
-                    
-                    // Simple heuristic: re-run the previous agent (index - 1) with this output as feedback
-                    if (i > 0) {
-                        i = i - 2; // Subtract 2 because loop will do i++ next iteration, effectively jumping to i-1
-                        continue;
+
+                    // Read current quality loop count from meta; cap at MAX_QUALITY_LOOPS per step
+                    int qualityCount = meta.qualityLoopCount != null ? meta.qualityLoopCount : 0;
+                    if (qualityCount < MAX_QUALITY_LOOPS) {
+                        meta.qualityLoopCount = qualityCount + 1;
+                        saveMeta(execution, meta);
+                        if (i > 0) {
+                            i = i - 2; // Subtract 2 because loop will do i++ next iteration, effectively re-running step i-1
+                            continue;
+                        }
+                    } else {
+                        log.warn("[quality-loop] Limit ({}) reached for step {} in execution {}. Proceeding to next step.",
+                            MAX_QUALITY_LOOPS, i, executionId);
+                        meta.qualityLoopCount = 0; // reset for next step
+                        saveMeta(execution, meta);
+                    }
+                } else {
+                    // Reset quality loop counter when a step passes without revision request
+                    if (meta.qualityLoopCount != null && meta.qualityLoopCount > 0) {
+                        meta.qualityLoopCount = 0;
+                        saveMeta(execution, meta);
                     }
                 }
 
@@ -1017,6 +1035,8 @@ public class ExecutionOrchestrator {
         public String previousOutput;
         public String feedback;
         public int restartCount = 0;
+        /** Tracks consecutive quality-loop retries for the current step; reset on step advance. */
+        public Integer qualityLoopCount = 0;
     }
 
     private static class StepPlan {

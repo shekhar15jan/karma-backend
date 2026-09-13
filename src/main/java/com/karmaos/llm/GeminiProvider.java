@@ -49,7 +49,8 @@ public class GeminiProvider implements LLMProvider {
         long start = System.currentTimeMillis();
         try {
             String model = request.getModel() != null ? request.getModel() : getDefaultModel();
-            String url = API_URL + "/" + model + ":generateContent?key=" + apiKey;
+            // Security: API key via header, NOT URL query param (prevents leakage in access logs)
+            String url = API_URL + "/" + model + ":generateContent";
 
             List<Map<String, Object>> contents = new ArrayList<>();
 
@@ -88,6 +89,7 @@ public class GeminiProvider implements LLMProvider {
 
             JsonNode response = webClient.post()
                 .uri(url)
+                .header("x-goog-api-key", apiKey)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .retrieve()
@@ -136,13 +138,16 @@ public class GeminiProvider implements LLMProvider {
             if (text == null || text.isBlank()) {
                 return List.of();
             }
-            String url = API_URL + "/" + model + ":embedContent?key=" + apiKey;            Map<String, Object> requestBody = Map.of(
+            // Security: API key via header, NOT URL query param
+            String url = API_URL + "/" + model + ":embedContent";
+            Map<String, Object> requestBody = Map.of(
                 "model", "models/" + model,
                 "content", Map.of("parts", List.of(Map.of("text", text)))
             );
 
             JsonNode response = webClient.post()
                 .uri(url)
+                .header("x-goog-api-key", apiKey)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .retrieve()
@@ -225,8 +230,10 @@ public class GeminiProvider implements LLMProvider {
     private List<String> listChatModels() {
         List<String> result = new ArrayList<>();
         try {
+            // Security: API key via header, NOT URL query param
             JsonNode response = webClient.get()
-                .uri("https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey)
+                .uri("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", apiKey)
                 .retrieve()
                 .bodyToMono(JsonNode.class)
                 .block();
@@ -247,8 +254,10 @@ public class GeminiProvider implements LLMProvider {
     public List<String> listEmbedModels() {
         List<String> result = new ArrayList<>();
         try {
+            // Security: API key via header, NOT URL query param
             JsonNode response = webClient.get()
-                .uri("https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey)
+                .uri("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", apiKey)
                 .retrieve()
                 .bodyToMono(JsonNode.class)
                 .block();
