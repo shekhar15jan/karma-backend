@@ -55,10 +55,10 @@ public class WorkflowController {
     }
 
     @PostMapping
-    public ResponseEntity<ApiResponse<WorkflowDefinition>> saveWorkflow(
+    public ResponseEntity<ApiResponse<com.karmaos.flow.FlowResponse>> saveWorkflow(
             @Valid @RequestBody WorkflowDefinitionRequest request,
             @AuthenticationPrincipal UserPrincipal user) {
-        return ResponseEntity.ok(ApiResponse.created(workflowService.createDefinition(request, user.getId())));
+        return ResponseEntity.ok(ApiResponse.created(workflowService.saveDesigner(request, user.getId())));
     }
 
     @PostMapping("/run")

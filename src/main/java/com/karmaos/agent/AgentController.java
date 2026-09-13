@@ -78,6 +78,20 @@ public class AgentController {
         return ResponseEntity.ok(ApiResponse.ok(agentService.update(id, request)));
     }
 
+    @PostMapping("/{id}/activate")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> activate(@PathVariable UUID id) {
+        agentService.activate(id);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Agent activated"));
+    }
+
+    @PostMapping("/{id}/deactivate")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> deactivate(@PathVariable UUID id) {
+        agentService.deactivate(id);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Agent deactivated"));
+    }
+
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {

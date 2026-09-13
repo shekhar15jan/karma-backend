@@ -51,4 +51,13 @@ public class Mission extends BaseEntity {
     @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "execution_plan", columnDefinition = "JSONB")
     private String executionPlan;
+
+    @Column(name = "output_directory", length = 500)
+    private String outputDirectory;
+
+    @Column(name = "target_duration_seconds")
+    private Integer targetDurationSeconds;
+
+    @Column(nullable = false, length = 50)
+    private String theme = "whiteboard";
 }

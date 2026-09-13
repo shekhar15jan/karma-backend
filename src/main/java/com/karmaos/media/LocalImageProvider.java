@@ -56,7 +56,7 @@ public class LocalImageProvider implements ImageProvider {
             int height = dims[1];
             String prompt = request.getPrompt() != null && !request.getPrompt().isBlank()
                 ? request.getPrompt().trim()
-                : "Karma OS";
+                : "a serene scenic image";
 
             int seed = prompt.hashCode();
             List<BufferedImage> images = new ArrayList<>();
@@ -125,12 +125,6 @@ public class LocalImageProvider implements ImageProvider {
         g.fillRoundRect(cx - tw / 2 - 16, labelY - 24, tw + 32, 40, 12, 12);
         g.setColor(Color.WHITE);
         g.drawString(label, cx - tw / 2, labelY + 2);
-
-        g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 16));
-        String sub = "KARMA OS · " + getDefaultModel();
-        int sw = g.getFontMetrics().stringWidth(sub);
-        g.setColor(new Color(255, 255, 255, 200));
-        g.drawString(sub, cx - sw / 2, 32);
 
         g.dispose();
         return img;

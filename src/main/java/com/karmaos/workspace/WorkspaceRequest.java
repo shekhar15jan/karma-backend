@@ -19,4 +19,7 @@ public class WorkspaceRequest {
 
     @Size(max = 2000)
     private String description;
+
+    @Size(max = 500)
+    private String defaultOutputDirectory;
 }

@@ -1,22 +1,28 @@
 package com.karmaos.execution;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.agent.Agent;
 import com.karmaos.agent.AgentRepository;
 import com.karmaos.agent.AgentRuntimeService;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
+import com.karmaos.artifact.ArtifactStorageService;
+import com.karmaos.access.OwnershipService;
 import com.karmaos.flow.Flow;
 import com.karmaos.flow.FlowRepository;
 import com.karmaos.junction.FlowAgent;
 import com.karmaos.junction.FlowAgentRepository;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowRepository;
+import com.karmaos.junction.AgentSkillRepository;
 import com.karmaos.media.MediaOrchestrationService;
 import com.karmaos.mission.Mission;
 import com.karmaos.mission.MissionRepository;
 import com.karmaos.publication.Publication;
 import com.karmaos.publishing.PublishingService;
+import com.karmaos.workflow.DesignPlan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -36,6 +42,8 @@ public class ExecutionOrchestrator {
 
     public static final int MAX_STEP_RETRIES = 3;
     public static final int MAX_FLOW_RESTARTS = 3;
+    /** Maximum times the quality loop can re-run a step before proceeding (prevents infinite spin). */
+    public static final int MAX_QUALITY_LOOPS = 2;
     public static final String MODE_AUTO = "AUTO";
     public static final String MODE_REVIEW = "REVIEW";
 
@@ -43,6 +51,7 @@ public class ExecutionOrchestrator {
     private final MissionFlowRepository missionFlowRepository;
     private final FlowRepository flowRepository;
     private final FlowAgentRepository flowAgentRepository;
+    private final AgentSkillRepository agentSkillRepository;
     private final AgentRepository agentRepository;
     private final ExecutionRepository executionRepository;
     private final ExecutionStepRepository stepRepository;
@@ -50,9 +59,12 @@ public class ExecutionOrchestrator {
     private final AgentRuntimeService agentRuntimeService;
     private final MediaOrchestrationService mediaOrchestrationService;
     private final ArtifactRepository artifactRepository;
+    private final ArtifactStorageService artifactStorageService;
     private final PublishingService publishingService;
     private final com.karmaos.sse.SseController sseController;
     private final ObjectMapper objectMapper;
+    private final com.karmaos.knowledge.EmbeddingService embeddingService;
+    private final OwnershipService ownershipService;
 
     private final Map<UUID, CompletableFuture<Void>> activeExecutions = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -61,6 +73,7 @@ public class ExecutionOrchestrator {
                                  MissionFlowRepository missionFlowRepository,
                                  FlowRepository flowRepository,
                                  FlowAgentRepository flowAgentRepository,
+                                 AgentSkillRepository agentSkillRepository,
                                  AgentRepository agentRepository,
                                  ExecutionRepository executionRepository,
                                  ExecutionStepRepository stepRepository,
@@ -68,13 +81,17 @@ public class ExecutionOrchestrator {
                                  AgentRuntimeService agentRuntimeService,
                                  MediaOrchestrationService mediaOrchestrationService,
                                  ArtifactRepository artifactRepository,
+                                 ArtifactStorageService artifactStorageService,
                                  PublishingService publishingService,
                                  com.karmaos.sse.SseController sseController,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 com.karmaos.knowledge.EmbeddingService embeddingService,
+                                 OwnershipService ownershipService) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
         this.flowAgentRepository = flowAgentRepository;
+        this.agentSkillRepository = agentSkillRepository;
         this.agentRepository = agentRepository;
         this.executionRepository = executionRepository;
         this.stepRepository = stepRepository;
@@ -82,20 +99,25 @@ public class ExecutionOrchestrator {
         this.agentRuntimeService = agentRuntimeService;
         this.mediaOrchestrationService = mediaOrchestrationService;
         this.artifactRepository = artifactRepository;
+        this.artifactStorageService = artifactStorageService;
         this.publishingService = publishingService;
         this.sseController = sseController;
         this.objectMapper = objectMapper;
+        this.embeddingService = embeddingService;
+        this.ownershipService = ownershipService;
     }
 
     @Transactional
     public Execution startExecution(UUID missionId) {
-        return startExecution(missionId, MODE_REVIEW);
+        return startExecution(missionId, MODE_AUTO);
     }
 
     @Transactional
     public Execution startExecution(UUID missionId, String mode) {
         Mission mission = missionRepository.findById(missionId)
             .orElseThrow(() -> new RuntimeException("Mission not found: " + missionId));
+
+        requireMissionTopic(mission);
 
         mission.setStatus("RUNNING");
         mission.setStartedAt(LocalDateTime.now());
@@ -120,7 +142,7 @@ public class ExecutionOrchestrator {
      */
     @Transactional
     public Execution startExecutionAfterCommit(UUID missionId) {
-        return startExecutionAfterCommit(missionId, MODE_REVIEW);
+        return startExecutionAfterCommit(missionId, MODE_AUTO);
     }
 
     @Transactional
@@ -210,18 +232,27 @@ public class ExecutionOrchestrator {
         UUID executionId = execution.getId();
         UUID missionId = execution.getMissionId();
         int stepOrder = step.getStepOrder();
-        StepPlan plan = fromStep(step);
+        List<MissionFlow> missionFlows = missionFlowRepository.findByIdMissionId(missionId);
+        missionFlows.sort(Comparator.comparingInt(MissionFlow::getExecOrder));
+        PlanHolder planHolder = buildPlan(missionFlows);
+        StepPlan plan = stepOrder >= 0 && stepOrder < planHolder.steps.size()
+            ? planHolder.steps.get(stepOrder) : fromStep(step);
         int retryCount = rejected;
 
         runAsync(executionId, () -> {
             try {
                 Meta meta = readMeta(execution);
-                ExecutionStep rerun = runStep(executionId, plan, stepOrder, meta.previousOutput, feedback, missionId);
+                Map<String, String> nodeOutputs = rebuildNodeOutputs(executionId);
+                String context = contextFor(meta.previousOutput, plan, nodeOutputs);
+                ExecutionStep rerun = runStep(executionId, plan, stepOrder, context, feedback, missionId);
                 if (!"COMPLETED".equals(rerun.getStatus())) {
                     executionService.complete(executionId, "FAILED",
                         "Regeneration failed: " + rerun.getErrorMessage());
                     updateMissionStatus(missionId, "FAILED");
                     return;
+                }
+                if (plan.nodeId != null) {
+                    rerun.setNodeId(plan.nodeId);
                 }
                 rerun.setRetryCount(retryCount);
                 rerun.setReviewStatus("PENDING_REVIEW");
@@ -346,25 +377,93 @@ public class ExecutionOrchestrator {
             updateMissionStatus(missionId, "FAILED");
             return;
         }
-        String mode = execution.getMode() != null ? execution.getMode() : MODE_REVIEW;
+        String mode = execution.getMode() != null ? execution.getMode() : MODE_AUTO;
         Meta meta = readMeta(execution);
         int startIndex = meta.resumeIndex;
         String previousOutput = meta.previousOutput != null ? meta.previousOutput : meta.feedback;
         int totalSteps = holder.steps.size();
 
+        Map<String, String> nodeOutputs = rebuildNodeOutputs(executionId);
+
         try {
             for (int i = startIndex; i < holder.steps.size(); i++) {
                 StepPlan sp = holder.steps.get(i);
-                ExecutionStep step = runStep(executionId, sp, i, previousOutput, null, missionId);
+                String context = contextFor(previousOutput, sp, nodeOutputs);
+                if ("LLM".equals(sp.kind)) {
+                    context = (context == null ? "" : context) + "\n\n" + runDirective(execution, sp, i);
+                }
+                ExecutionStep step = runStep(executionId, sp, i, context, null, missionId);
 
                 if (!"COMPLETED".equals(step.getStatus())) {
-                    executionService.complete(executionId, "FAILED",
-                        "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage());
-                    updateMissionStatus(missionId, "FAILED");
-                    return;
+                    // VIDEO-only auto-retry (up to 3 attempts) to avoid restarting Research/Script
+                    if ("VIDEO".equals(sp.kind)) {
+                        boolean retried = false;
+                        for (int attempt = 1; attempt <= 2; attempt++) {
+                            long backoff = attempt * 4000L + (long) (Math.random() * 2000);
+                            log.warn("VIDEO step failed (attempt {}), retrying in {}ms: {}", attempt, backoff, step.getErrorMessage());
+                            try { Thread.sleep(backoff); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                            emitExecutionEvent(executionId, "step.retry",
+                                "{\"executionId\":\"" + executionId + "\",\"stepOrder\":" + i + ",\"attempt\":" + (attempt+1) + "}");
+                            step = runStep(executionId, sp, i, context, null, missionId);
+                            if ("COMPLETED".equals(step.getStatus())) { retried = true; break; }
+                        }
+                        if (retried) {
+                            log.info("VIDEO step recovered after retry for execution {}", executionId);
+                        } else {
+                            // Leave execution FAILED but resumeIndex points to VIDEO so retryVideoStep can resume
+                            Meta retryMeta = readMeta(execution);
+                            retryMeta.resumeIndex = i;
+                            retryMeta.previousOutput = previousOutput;
+                            saveMeta(execution, retryMeta);
+                            executionService.complete(executionId, "FAILED",
+                                "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage()
+                                + " — retry with POST /api/v1/executions/" + executionId + "/retry-video");
+                            updateMissionStatus(missionId, "FAILED");
+                            return;
+                        }
+                    } else {
+                        executionService.complete(executionId, "FAILED",
+                            "Step failed: flow=" + sp.flowId + " agent=" + sp.agentId + " error=" + step.getErrorMessage());
+                        updateMissionStatus(missionId, "FAILED");
+                        return;
+                    }
                 }
 
+                if (sp.nodeId != null) {
+                    step.setNodeId(sp.nodeId);
+                    stepRepository.save(step);
+                    nodeOutputs.put(sp.nodeId, step.getOutputData());
+                }
                 previousOutput = step.getOutputData();
+                
+                // AUTOMATED QUALITY LOOP — guarded against infinite spin
+                if (previousOutput != null && previousOutput.contains("\"revise_and_resubmit\"")) {
+                    log.info("Automated Critic requested revision. Restarting from previous step with feedback.");
+                    emitExecutionEvent(executionId, "execution.quality_loop", "{\"message\":\"Quality scores below threshold, auto-reprompting\"}");
+
+                    // Read current quality loop count from meta; cap at MAX_QUALITY_LOOPS per step
+                    int qualityCount = meta.qualityLoopCount != null ? meta.qualityLoopCount : 0;
+                    if (qualityCount < MAX_QUALITY_LOOPS) {
+                        meta.qualityLoopCount = qualityCount + 1;
+                        saveMeta(execution, meta);
+                        if (i > 0) {
+                            i = i - 2; // Subtract 2 because loop will do i++ next iteration, effectively re-running step i-1
+                            continue;
+                        }
+                    } else {
+                        log.warn("[quality-loop] Limit ({}) reached for step {} in execution {}. Proceeding to next step.",
+                            MAX_QUALITY_LOOPS, i, executionId);
+                        meta.qualityLoopCount = 0; // reset for next step
+                        saveMeta(execution, meta);
+                    }
+                } else {
+                    // Reset quality loop counter when a step passes without revision request
+                    if (meta.qualityLoopCount != null && meta.qualityLoopCount > 0) {
+                        meta.qualityLoopCount = 0;
+                        saveMeta(execution, meta);
+                    }
+                }
+
                 updateMissionProgress(missionId,
                         totalSteps > 0 ? (int) Math.round(((i + 1) * 100.0) / totalSteps) : 100);
                 emitExecutionEvent(executionId, "step.completed",
@@ -409,6 +508,8 @@ public class ExecutionOrchestrator {
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             case "VOICE" -> mediaOrchestrationService.executeVoiceStep(
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+            case "MUSIC" -> mediaOrchestrationService.executeMusicStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             case "VIDEO" -> mediaOrchestrationService.executeVideoStep(
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             default -> agentRuntimeService.executeAgentStep(
@@ -428,6 +529,12 @@ public class ExecutionOrchestrator {
                 continue;
             }
 
+            DesignPlanHolder design = parseDesign(flow);
+            if (design != null) {
+                buildDesignSteps(flowId, flow, design, steps, mediaFlows);
+                continue;
+            }
+
             List<FlowAgent> flowAgents = flowAgentRepository.findByIdFlowIdOrderByStepOrderAsc(flowId);
             if (flowAgents.isEmpty()) {
                 log.warn("No agents assigned to flow {}", flowId);
@@ -438,7 +545,15 @@ public class ExecutionOrchestrator {
 
             for (FlowAgent fa : flowAgents) {
                 Agent agent = fa.getId() != null ? agentRepository.findById(fa.getId().getAgentId()).orElse(null) : null;
+                if (agent != null && agentSkillRepository.findByIdAgentId(agent.getId()).isEmpty()) {
+                    throw new RuntimeException("Agent '" + agent.getName() + "' has no skills assigned. "
+                        + "Skills are a mandatory behavioral contract; assign a skill before executing.");
+                }
                 String kind = resolveStepKind(category, agent);
+                if ("IMAGE".equals(kind) && "VIDEO".equalsIgnoreCase(category)) {
+                    log.info("Dropping IMAGE step from VIDEO flow plan as per B5");
+                    continue;
+                }
                 if (isMediaKind(kind)) {
                     mediaFlows.add(flowId);
                 }
@@ -448,21 +563,85 @@ public class ExecutionOrchestrator {
         return new PlanHolder(steps, mediaFlows);
     }
 
-    private String resolveStepKind(String flowCategory, Agent agent) {
-        if ("PUBLISHING".equals(flowCategory)) {
-            return "PUBLISH";
+    private DesignPlanHolder parseDesign(Flow flow) {
+        String parameters = flow.getParameters();
+        if (parameters == null || parameters.isBlank()) {
+            return null;
         }
+        try {
+            JsonNode root = objectMapper.readTree(parameters);
+            if (root == null || !root.hasNonNull(DesignPlan.KEY_DESIGN)) {
+                return null;
+            }
+            JsonNode design = root.get(DesignPlan.KEY_DESIGN);
+            List<Map<String, Object>> nodes = objectMapper.convertValue(design.get("nodes"),
+                new TypeReference<List<Map<String, Object>>>() { });
+            List<Map<String, String>> edges = objectMapper.convertValue(design.get("edges"),
+                new TypeReference<List<Map<String, String>>>() { });
+            return new DesignPlanHolder(DesignPlan.resolve(nodes, edges));
+        } catch (Exception e) {
+            log.warn("Invalid design parameters for flow {}: {}", flow.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private void buildDesignSteps(UUID flowId, Flow flow, DesignPlanHolder design,
+                                  List<StepPlan> steps, Set<UUID> mediaFlows) {
+        String category = flow.getCategory() != null ? flow.getCategory() : "";
+        for (DesignPlan.Node node : design.nodes) {
+            Agent agent = node.agentId != null ? agentRepository.findById(node.agentId).orElse(null) : null;
+            if (agent != null && agentSkillRepository.findByIdAgentId(agent.getId()).isEmpty()) {
+                throw new RuntimeException("Agent '" + agent.getName() + "' has no skills assigned. "
+                    + "Skills are a mandatory behavioral contract; assign a skill before executing.");
+            }
+            String kind = resolveDesignKind(node.stepKind, category, agent);
+            if ("IMAGE".equals(kind) && "VIDEO".equalsIgnoreCase(category)) {
+                log.info("Dropping IMAGE step from VIDEO flow plan as per B5");
+                continue;
+            }
+            if (isMediaKind(kind)) {
+                mediaFlows.add(flowId);
+            }
+            steps.add(new StepPlan(flowId, node.agentId, kind, node.nodeId, node.upstreams));
+        }
+    }
+
+    private String resolveDesignKind(String stepKind, String flowCategory, Agent agent) {
+        if (stepKind != null && !stepKind.isBlank()) {
+            String kind = stepKind.trim().toUpperCase();
+            switch (kind) {
+                case "VIDEO":
+                case "PUBLISH":
+                case "IMAGE":
+                case "VOICE":
+                case "MUSIC":
+                    return kind;
+                default:
+                    // "AGENT" or unknown kinds fall through to inference
+                    break;
+            }
+        }
+        return resolveStepKind(flowCategory, agent);
+    }
+
+    private String resolveStepKind(String flowCategory, Agent agent) {
         if (agent == null) {
             return "LLM";
         }
         String agentName = agent.getName() != null ? agent.getName().toLowerCase() : "";
         String agentCategory = agent.getCategory() != null ? agent.getCategory().toUpperCase() : "";
+        if ("PUBLISHING".equals(agentCategory) || agentName.contains("publish")) {
+            return "PUBLISH";
+        }
         if ("MEDIA".equals(agentCategory)) {
             if (agentName.contains("image") || agentName.contains("thumbnail")) {
                 return "IMAGE";
             }
             if (agentName.contains("voice") || agentName.contains("audio")) {
                 return "VOICE";
+            }
+            if (agentName.contains("music")) {
+                return "MUSIC";
             }
             if (agentName.contains("video")) {
                 return "VIDEO";
@@ -473,7 +652,8 @@ public class ExecutionOrchestrator {
     }
 
     private boolean isMediaKind(String kind) {
-        return "IMAGE".equals(kind) || "VOICE".equals(kind) || "VIDEO".equals(kind) || "PUBLISH".equals(kind);
+        return "IMAGE".equals(kind) || "VOICE".equals(kind) || "MUSIC".equals(kind)
+                || "VIDEO".equals(kind) || "PUBLISH".equals(kind);
     }
 
     private StepPlan fromStep(ExecutionStep step) {
@@ -482,15 +662,62 @@ public class ExecutionOrchestrator {
                 case "PUBLISH" -> "PUBLISH";
                 case "IMAGE_GENERATION" -> "IMAGE";
                 case "TTS" -> "VOICE";
+                case "MUSIC_GENERATION" -> "MUSIC";
                 case "VIDEO_GENERATION" -> "VIDEO";
                 default -> "LLM";
-            });
+            }, step.getNodeId(), Collections.emptyList());
     }
 
     private int countRejectedAttempts(UUID executionId, int stepOrder) {
         return (int) stepRepository.findByExecutionIdOrderByStepOrder(executionId).stream()
             .filter(s -> s.getStepOrder() == stepOrder && "REJECTED".equals(s.getReviewStatus()))
             .count();
+    }
+
+    private Map<String, String> rebuildNodeOutputs(UUID executionId) {
+        Map<String, String> outputs = new HashMap<>();
+        for (ExecutionStep step : stepRepository.findByExecutionIdOrderByStepOrder(executionId)) {
+            if (step.getNodeId() != null && "COMPLETED".equals(step.getStatus())
+                    && step.getOutputData() != null && !step.getOutputData().isBlank()) {
+                outputs.put(step.getNodeId(), step.getOutputData());
+            }
+        }
+        return outputs;
+    }
+
+    private String contextFor(String fallback, StepPlan sp, Map<String, String> nodeOutputs) {
+        if (sp.nodeId == null || sp.upstreams.isEmpty()) {
+            return fallback;
+        }
+        StringBuilder context = new StringBuilder();
+        for (String upstream : sp.upstreams) {
+            String output = nodeOutputs.get(upstream);
+            if (output == null || output.isBlank()) {
+                continue;
+            }
+            if (context.length() > 0) {
+                context.append("\n\n");
+            }
+            context.append(output);
+        }
+        return context.length() > 0 ? context.toString() : fallback;
+    }
+
+    /** Per-run creative directive appended to LLM-step context. Deterministic for a
+     *  given execution (retries within one run stay stable) but unique across runs,
+     *  which busts the LLM response cache and yields fresh content every run. */
+    private String runDirective(Execution execution, StepPlan sp, int stepIndex) {
+        UUID execId = execution.getId();
+        int seed = (execId.hashCode() & Integer.MAX_VALUE);
+        int runNumber = (seed % 997) + 1;
+        StringBuilder sb = new StringBuilder();
+        sb.append("[RUN DIRECTIVE #").append(runNumber).append("]\n");
+        sb.append("This is a fresh take for run ").append(runNumber)
+          .append(" (execution ").append(execId).append("). Vary this output from any previous version of the same mission: ");
+        sb.append("choose a different angle, hook, examples, analogies and ordering where possible. ");
+        sb.append("For visual video specs, avoid using the same \"layout\" more than twice in a row and prefer variety across the allowed layouts. ");
+        sb.append("Keep facts accurate and follow the mandated output contract exactly.");
+        return sb.toString();
     }
 
     private void createArtifactsFromOutput(Execution execution, List<MissionFlow> missionFlows,
@@ -529,9 +756,11 @@ public class ExecutionOrchestrator {
             artifact.setStatus("COMPLETED");
             artifact.setContentText(flowOutput);
             artifact.setContentType("text/markdown");
-            artifact.setReviewStatus("PENDING");
+            artifact.setReviewStatus("AUTO".equalsIgnoreCase(execution.getMode()) ? "APPROVED" : "PENDING");
             artifact.setPublicationStatus("UNPUBLISHED");
+            artifactStorageService.persist(artifact, missionId);
             artifactRepository.save(artifact);
+            embeddingService.indexArtifact(artifact.getId(), artifact.getContentText());
         }
     }
 
@@ -543,12 +772,147 @@ public class ExecutionOrchestrator {
             String output = step.getOutputData();
             if (output == null || output.isBlank()) continue;
             if ("IMAGE".equals(step.getStepType()) || "TTS".equals(step.getStepType())
+                    || "MUSIC_GENERATION".equals(step.getStepType())
                     || "VIDEO_GENERATION".equals(step.getStepType()) || "PUBLISH".equals(step.getStepType())) {
                 continue;
             }
             result.put(step.getFlowId(), output);
         }
         return result;
+    }
+
+    /**
+     * Retry only the VIDEO step of a FAILED execution, resuming from the
+     * last successful step. Keeps Research/Script/Voice artifacts intact.
+     * Used when previousOutput is already valid but ffmpeg/Remotion failed.
+     */
+    public void retryVideoStep(UUID executionId) {
+        Execution execution = executionRepository.findById(executionId).orElse(null);
+        if (execution == null) {
+            log.warn("Cannot retry video for unknown execution {}", executionId);
+            return;
+        }
+        if (!"FAILED".equals(execution.getStatus())) {
+            log.warn("Execution {} is {} not FAILED — cannot retry video", executionId, execution.getStatus());
+            return;
+        }
+        List<ExecutionStep> steps = stepRepository.findByExecutionIdOrderByStepOrder(executionId);
+        int videoIndex = -1;
+        for (int i = 0; i < steps.size(); i++) {
+            ExecutionStep s = steps.get(i);
+            if ("VIDEO_GENERATION".equals(s.getStepType()) || "VIDEO".equals(s.getStepType())) {
+                videoIndex = s.getStepOrder();
+                break;
+            }
+        }
+        // Fallback: infer from plan (last step is VIDEO for Default Video Flow)
+        if (videoIndex < 0) {
+            List<MissionFlow> mfs = missionFlowRepository.findByIdMissionId(execution.getMissionId());
+            mfs.sort(Comparator.comparingInt(MissionFlow::getExecOrder));
+            PlanHolder holder = buildPlan(mfs);
+            for (int i = 0; i < holder.steps.size(); i++) {
+                if ("VIDEO".equals(holder.steps.get(i).kind)) videoIndex = i;
+            }
+        }
+        if (videoIndex < 0) {
+            log.warn("No VIDEO step found for execution {}", executionId);
+            return;
+        }
+        // Resume from video step, rebuilding previousOutput from last COMPLETED step before it
+        Meta meta = new Meta();
+        meta.resumeIndex = videoIndex;
+        String prev = null;
+        for (int i = videoIndex - 1; i >= 0; i--) {
+            final int idx = i;
+            ExecutionStep s = steps.stream().filter(x -> x.getStepOrder() == idx).findFirst().orElse(null);
+            if (s != null && "COMPLETED".equals(s.getStatus()) && s.getOutputData() != null) { prev = s.getOutputData(); break; }
+        }
+        meta.previousOutput = prev;
+        // Extract nodeOutputs from completed steps for DAG flows
+        execution.setStatus("PENDING");
+        execution.setMetadata(toMetaJson(meta));
+        executionRepository.save(execution);
+        updateMissionStatus(execution.getMissionId(), "RUNNING");
+        log.info("Retrying VIDEO step {} for execution {}", videoIndex, executionId);
+        final Execution execRef = execution;
+        runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef)));
+    }
+
+    public void retryScriptStep(UUID executionId) {
+        Execution execution = executionRepository.findById(executionId).orElse(null);
+        if (execution == null) {
+            log.warn("Cannot retry script for unknown execution {}", executionId);
+            return;
+        }
+        if (!"FAILED".equals(execution.getStatus())) {
+            log.warn("Execution {} is {} not FAILED — cannot retry script", executionId, execution.getStatus());
+            return;
+        }
+        List<ExecutionStep> steps = stepRepository.findByExecutionIdOrderByStepOrder(executionId);
+        ExecutionStep failedStep = null;
+        for (ExecutionStep s : steps) {
+            if ("FAILED".equals(s.getStatus()) && s.getAgentId() != null) {
+                Agent agent = agentRepository.findById(s.getAgentId()).orElse(null);
+                if (agent != null && agent.getName() != null && agent.getName().toLowerCase().contains("script")) {
+                    failedStep = s;
+                    break;
+                }
+            }
+        }
+        if (failedStep == null) {
+            log.warn("No failed script step found for execution {}", executionId);
+            return;
+        }
+        // If the failed step already has a partial script (from per-chunk persistence), try to coerce and complete it
+        String partial = failedStep.getOutputData();
+        if (partial != null && partial.contains("script_body")) {
+            try {
+                Agent agent = agentRepository.findById(failedStep.getAgentId()).orElse(null);
+                if (agent != null && agentRuntimeService.isOutputValidFor(agent, partial)) {
+                    log.info("Retrying script: partial output now valid for execution {} (coercion fixed it), marking COMPLETED", executionId);
+                    failedStep.setStatus("COMPLETED");
+                    failedStep.setErrorMessage(null);
+                    stepRepository.save(failedStep);
+                    // Resume from next step (Voice)
+                    Meta meta = new Meta();
+                    meta.resumeIndex = failedStep.getStepOrder() + 1;
+                    meta.previousOutput = partial;
+                    execution.setStatus("PENDING");
+                    execution.setMetadata(toMetaJson(meta));
+                    executionRepository.save(execution);
+                    updateMissionStatus(execution.getMissionId(), "RUNNING");
+                    final Execution execRef = execution;
+                    runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef)));
+                    return;
+                }
+            } catch (Exception e) {
+                log.warn("Retry script validation failed for {}: {}", executionId, e.getMessage());
+            }
+        }
+        // Otherwise, resume script from last successful chunk (or from scratch if no partial)
+        Meta meta = new Meta();
+        meta.resumeIndex = failedStep.getStepOrder();
+        String prev = null;
+        for (int i = failedStep.getStepOrder() - 1; i >= 0; i--) {
+            final int idx = i;
+            ExecutionStep s = steps.stream().filter(x -> x.getStepOrder() == idx).findFirst().orElse(null);
+            if (s != null && "COMPLETED".equals(s.getStatus()) && s.getOutputData() != null) {
+                prev = s.getOutputData();
+                break;
+            }
+        }
+        meta.previousOutput = prev;
+        // Keep partial progress as previousOutput if it exists (so generateScriptIteratively can resume)
+        if (partial != null && partial.contains("script_body") && (prev == null || partial.length() > prev.length())) {
+            meta.previousOutput = partial;
+        }
+        execution.setStatus("PENDING");
+        execution.setMetadata(toMetaJson(meta));
+        executionRepository.save(execution);
+        updateMissionStatus(execution.getMissionId(), "RUNNING");
+        log.info("Retrying SCRIPT step {} for execution {} (will resume from chunk {})", failedStep.getStepOrder(), executionId, meta.resumeIndex);
+        final Execution execRef2 = execution;
+        runAsync(executionId, () -> runFrom(executionRepository.findById(executionId).orElse(execRef2)));
     }
 
     public void cancelExecution(UUID executionId) {
@@ -577,6 +941,25 @@ public class ExecutionOrchestrator {
         return future != null && !future.isDone();
     }
 
+    private void requireMissionTopic(Mission mission) {
+        String name = mission.getName() != null ? mission.getName().trim() : "";
+        String description = mission.getDescription() != null ? mission.getDescription().trim() : "";
+        String lowerName = name.toLowerCase();
+        boolean genericName = name.isBlank()
+            || "untitled".equals(lowerName)
+            || "video".equals(lowerName)
+            || "video workflow".equals(lowerName)
+            || "workflow".equals(lowerName)
+            || "mission".equals(lowerName)
+            || "blog".equals(lowerName)
+            || "thumbnail".equals(lowerName);
+        if (genericName && description.isBlank()) {
+            throw new RuntimeException(
+                "No mission topic provided. Set a meaningful mission name or description (the topic/brief "
+                    + "for this video) before triggering execution.");
+        }
+    }
+
     private void updateMissionStatus(UUID missionId, String status) {
         missionRepository.findById(missionId).ifPresent(mission -> {
             mission.setStatus(status);
@@ -593,15 +976,25 @@ public class ExecutionOrchestrator {
 
     private void emitExecutionEvent(UUID executionId, String eventType, String data) {
         try {
-            sseController.sendEvent(eventType, data);
+            Execution execution = executionRepository.findById(executionId).orElse(null);
+            if (execution == null || execution.getMissionId() == null) {
+                return;
+            }
+            UUID ownerId = ownershipService.resolveMissionOwnerId(execution.getMissionId());
+            sseController.sendEvent(ownerId, eventType, data);
         } catch (Exception e) {
             log.debug("SSE emit failed for {} {}: {}", eventType, executionId, e.getMessage());
         }
     }
 
     private void emitMissionEvent(UUID missionId, String status) {
-        emitExecutionEvent(missionId, "mission." + status.toLowerCase(),
-            "{\"missionId\":\"" + missionId + "\",\"status\":\"" + status + "\"}");
+        try {
+            UUID ownerId = ownershipService.resolveMissionOwnerId(missionId);
+            sseController.sendEvent(ownerId, "mission." + status.toLowerCase(),
+                "{\"missionId\":\"" + missionId + "\",\"status\":\"" + status + "\"}");
+        } catch (Exception e) {
+            log.debug("SSE mission event emit failed for {} {}: {}", missionId, status, e.getMessage());
+        }
     }
 
     private void updateMissionProgress(UUID missionId, int progress) {
@@ -642,17 +1035,35 @@ public class ExecutionOrchestrator {
         public String previousOutput;
         public String feedback;
         public int restartCount = 0;
+        /** Tracks consecutive quality-loop retries for the current step; reset on step advance. */
+        public Integer qualityLoopCount = 0;
     }
 
     private static class StepPlan {
         final UUID flowId;
         final UUID agentId;
         final String kind;
+        final String nodeId;
+        final List<String> upstreams;
 
         StepPlan(UUID flowId, UUID agentId, String kind) {
+            this(flowId, agentId, kind, null, Collections.emptyList());
+        }
+
+        StepPlan(UUID flowId, UUID agentId, String kind, String nodeId, List<String> upstreams) {
             this.flowId = flowId;
             this.agentId = agentId;
             this.kind = kind;
+            this.nodeId = nodeId;
+            this.upstreams = upstreams == null ? Collections.emptyList() : upstreams;
+        }
+    }
+
+    private static class DesignPlanHolder {
+        final List<DesignPlan.Node> nodes;
+
+        DesignPlanHolder(List<DesignPlan.Node> nodes) {
+            this.nodes = nodes;
         }
     }
 

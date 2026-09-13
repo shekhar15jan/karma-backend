@@ -37,6 +37,11 @@ public class FlowController {
         return ResponseEntity.ok(ApiResponse.ok(flowService.getById(id)));
     }
 
+    @GetMapping("/{id}/details")
+    public ResponseEntity<ApiResponse<FlowDetailResponse>> getDetails(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(flowService.getDetails(id)));
+    }
+
     @PostMapping
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<FlowResponse>> create(@Valid @RequestBody FlowRequest request) {

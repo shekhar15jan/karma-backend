@@ -252,6 +252,7 @@ public class ExecutionService {
                 .agentId(s.getAgentId())
                 .stepOrder(s.getStepOrder())
                 .stepType(s.getStepType())
+                .nodeId(s.getNodeId())
                 .status(s.getStatus())
                 .reviewStatus(s.getReviewStatus())
                 .inputData(s.getInputData())

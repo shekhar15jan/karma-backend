@@ -31,6 +31,9 @@ public class ExecutionStep extends BaseEntity {
     @Column(name = "step_order", nullable = false)
     private int stepOrder = 0;
 
+    @Column(name = "node_id", length = 64)
+    private String nodeId;
+
     @Column(name = "step_type", nullable = false, length = 50)
     private String stepType;
 

@@ -21,6 +21,7 @@ public class ExecutionStepResponse {
     private UUID agentId;
     private int stepOrder;
     private String stepType;
+    private String nodeId;
     private String status;
     private String reviewStatus;
     private String inputData;

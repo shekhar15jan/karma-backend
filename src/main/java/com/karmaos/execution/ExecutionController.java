@@ -87,7 +87,7 @@ public class ExecutionController {
     @PostMapping("/trigger/{missionId}")
     public ResponseEntity<ApiResponse<Map<String, Object>>> trigger(
             @PathVariable UUID missionId,
-            @RequestParam(defaultValue = "REVIEW") String mode,
+            @RequestParam(defaultValue = "AUTO") String mode,
             @AuthenticationPrincipal UserPrincipal user) {
         ownershipService.getOwnedMission(user.getId(), missionId);
         Execution execution = orchestrator.startExecutionAfterCommit(missionId, mode);
@@ -109,6 +109,32 @@ public class ExecutionController {
         return ResponseEntity.ok(ApiResponse.ok(Map.of(
             "executionId", id.toString(),
             "status", "CANCELLED"
+        )));
+    }
+
+    @PostMapping("/{id}/retry-video")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> retryVideo(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        ownershipService.getOwnedExecution(user.getId(), id);
+        orchestrator.retryVideoStep(id);
+        return ResponseEntity.ok(ApiResponse.ok(Map.of(
+            "executionId", id.toString(),
+            "status", "RETRYING",
+            "message", "Video step retry triggered — resumes from last successful step"
+        )));
+    }
+
+    @PostMapping("/{id}/retry-script")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> retryScript(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal user) {
+        ownershipService.getOwnedExecution(user.getId(), id);
+        orchestrator.retryScriptStep(id);
+        return ResponseEntity.ok(ApiResponse.ok(Map.of(
+            "executionId", id.toString(),
+            "status", "RETRYING",
+            "message", "Script step retry triggered — resumes from last successful chunk (coercion applied)"
         )));
     }
 

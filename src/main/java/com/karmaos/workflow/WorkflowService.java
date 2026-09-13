@@ -7,11 +7,8 @@ import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
 import com.karmaos.execution.Execution;
 import com.karmaos.execution.ExecutionOrchestrator;
-import com.karmaos.flow.Flow;
-import com.karmaos.flow.FlowRepository;
-import com.karmaos.junction.FlowAgent;
-import com.karmaos.junction.FlowAgentId;
-import com.karmaos.junction.FlowAgentRepository;
+import com.karmaos.flow.FlowResponse;
+import com.karmaos.flow.FlowService;
 import com.karmaos.junction.MissionFlow;
 import com.karmaos.junction.MissionFlowId;
 import com.karmaos.junction.MissionFlowRepository;
@@ -38,38 +35,35 @@ public class WorkflowService {
     private final ObjectMapper objectMapper;
     private final ExecutionOrchestrator orchestrator;
     private final MissionRepository missionRepository;
-    private final FlowRepository flowRepository;
-    private final FlowAgentRepository flowAgentRepository;
     private final MissionFlowRepository missionFlowRepository;
     private final WorkspaceRepository workspaceRepository;
     private final ProjectRepository projectRepository;
     private final AgentRepository agentRepository;
     private final OwnershipService ownershipService;
+    private final FlowService flowService;
 
     public WorkflowService(WorkflowDefinitionRepository definitionRepository,
                            WorkflowRunRepository runRepository,
                            ObjectMapper objectMapper,
                            ExecutionOrchestrator orchestrator,
                            MissionRepository missionRepository,
-                           FlowRepository flowRepository,
-                           FlowAgentRepository flowAgentRepository,
                            MissionFlowRepository missionFlowRepository,
                            WorkspaceRepository workspaceRepository,
                            ProjectRepository projectRepository,
                            AgentRepository agentRepository,
-                           OwnershipService ownershipService) {
+                           OwnershipService ownershipService,
+                           FlowService flowService) {
         this.definitionRepository = definitionRepository;
         this.runRepository = runRepository;
         this.objectMapper = objectMapper;
         this.orchestrator = orchestrator;
         this.missionRepository = missionRepository;
-        this.flowRepository = flowRepository;
-        this.flowAgentRepository = flowAgentRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.workspaceRepository = workspaceRepository;
         this.projectRepository = projectRepository;
         this.agentRepository = agentRepository;
         this.ownershipService = ownershipService;
+        this.flowService = flowService;
     }
 
     public List<WorkflowDefinition> listDefinitions(UUID projectId, UUID userId) {
@@ -78,13 +72,21 @@ public class WorkflowService {
     }
 
     @Transactional
-    public WorkflowDefinition createDefinition(WorkflowDefinitionRequest request, UUID userId) {
+    public FlowResponse saveDesigner(WorkflowDefinitionRequest request, UUID userId) {
+        UUID projectId = request.getProjectId();
+        if (projectId != null) {
+            ownershipService.getOwnedProject(userId, projectId);
+        }
+        persistDefinition(request, projectId);
+        return flowService.upsertDesignerFlow(request.getName(), request.getDescription(),
+            request.getCategory(), request.getNodes(), request.getEdges());
+    }
+
+    @Transactional
+    public WorkflowDefinition persistDefinition(WorkflowDefinitionRequest request, UUID projectId) {
         WorkflowDefinition def = new WorkflowDefinition();
         def.setName(request.getName());
-        if (request.getProjectId() != null) {
-            ownershipService.getOwnedProject(userId, request.getProjectId());
-            def.setProjectId(request.getProjectId());
-        }
+        def.setProjectId(projectId);
         try {
             def.setNodes(objectMapper.writeValueAsString(request.getNodes()));
             def.setEdges(objectMapper.writeValueAsString(request.getEdges()));
@@ -100,6 +102,11 @@ public class WorkflowService {
         UUID projectId = resolveProjectId(userId);
         validateAgentIds(request.getNodes());
 
+        WorkflowDefinition definition = persistDefinition(request, projectId);
+        FlowResponse flowResponse = flowService.upsertDesignerFlow(request.getName(), request.getDescription(),
+            request.getCategory(), request.getNodes(), request.getEdges());
+        UUID flowId = flowResponse.getId();
+
         Mission mission = new Mission();
         mission.setProjectId(projectId);
         mission.setName(request.getName());
@@ -108,29 +115,8 @@ public class WorkflowService {
         mission.setProgress(0);
         mission = missionRepository.save(mission);
 
-        Flow flow = new Flow();
-        flow.setName(request.getName() + " - " + LocalDateTime.now().toString());
-        flow.setCategory("DESIGNER");
-        flow.setEnabled(true);
-        flow.setExecutionOrder(0);
-        flow = flowRepository.save(flow);
-
-        List<Map<String, Object>> nodes = request.getNodes();
-        if (nodes != null) {
-            for (int i = 0; i < nodes.size(); i++) {
-                Object agentIdObj = nodes.get(i).get("agentId");
-                if (agentIdObj != null) {
-                    UUID agentId = UUID.fromString(agentIdObj.toString());
-                    FlowAgent fa = new FlowAgent();
-                    fa.setId(new FlowAgentId(flow.getId(), agentId));
-                    fa.setStepOrder(i);
-                    flowAgentRepository.save(fa);
-                }
-            }
-        }
-
         MissionFlow mf = new MissionFlow();
-        mf.setId(new MissionFlowId(mission.getId(), flow.getId()));
+        mf.setId(new MissionFlowId(mission.getId(), flowId));
         mf.setExecOrder(0);
         mf.setStatus("ACTIVE");
         missionFlowRepository.save(mf);
@@ -142,7 +128,8 @@ public class WorkflowService {
         run.setProjectId(projectId);
         run.setExecutionId(execution.getId());
         run.setMissionId(mission.getId());
-        run.setFlowId(flow.getId());
+        run.setFlowId(flowId);
+        run.setWorkflowId(definition.getId());
         run.setStatus("RUNNING");
         run.setStartedAt(LocalDateTime.now());
         run = runRepository.save(run);

@@ -14,4 +14,6 @@ public interface SettingsRepository extends JpaRepository<Settings, UUID> {
     Optional<Settings> findByWorkspaceId(UUID workspaceId);
 
     Optional<Settings> findByUserId(UUID userId);
+
+    Optional<Settings> findFirstByOrderByUpdatedAtDesc();
 }

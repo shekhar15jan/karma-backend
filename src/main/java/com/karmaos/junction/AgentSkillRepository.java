@@ -12,4 +12,6 @@ public interface AgentSkillRepository extends JpaRepository<AgentSkill, AgentSki
     List<AgentSkill> findByIdAgentId(UUID agentId);
 
     List<AgentSkill> findByIdSkillId(UUID skillId);
+
+    void deleteAllByIdSkillId(UUID skillId);
 }

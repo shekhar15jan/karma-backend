@@ -26,7 +26,8 @@ public class LLMProviderFactory {
     }
 
     public LLMProvider getProvider(String providerType, String apiKey, String apiEndpoint) {
-        String key = providerType.toLowerCase() + ":" + (apiKey != null ? apiKey.hashCode() : "null");
+        String key = providerType.toLowerCase() + ":" + (apiKey != null ? apiKey.hashCode() : "null")
+                + ":" + (apiEndpoint != null ? apiEndpoint.hashCode() : "null");
         return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey, apiEndpoint));
     }
 
@@ -45,8 +46,6 @@ public class LLMProviderFactory {
     private LLMProvider createProvider(String providerType, String apiKey, String apiEndpoint) {
         String type = providerType.toLowerCase();
         return switch (type) {
-            case "openai"      -> new OpenAiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
-            case "anthropic"   -> new AnthropicProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "gemini"      -> new GeminiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "google"      -> new GeminiProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);
             case "openrouter"  -> new OpenRouterProvider(apiKey != null ? apiKey : "", webClientBuilder, objectMapper);

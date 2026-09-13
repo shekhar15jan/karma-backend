@@ -21,6 +21,10 @@ public class WorkflowDefinitionRequest {
     @NotBlank
     private String name;
 
+    private String description;
+
+    private String category;
+
     private List<Map<String, Object>> nodes;
     private List<Map<String, String>> edges;
 }

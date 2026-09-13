@@ -12,6 +12,8 @@ public interface AgentRepository extends JpaRepository<Agent, UUID> {
 
     List<Agent> findByStatus(String status);
 
+    List<Agent> findByStatusNot(String status);
+
     List<Agent> findByCategoryAndStatus(String category, String status);
 
     Optional<Agent> findByIdAndStatus(UUID id, String status);

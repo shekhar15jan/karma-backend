@@ -25,25 +25,49 @@ public class ImageProviderFactory {
     }
 
     public ImageProvider getProvider(String providerType, String apiKey) {
-        String key = (providerType != null ? providerType.toLowerCase() : "") + ":" + (apiKey != null ? apiKey.hashCode() : "null");
-        return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey));
+        return getProvider(providerType, apiKey, null);
+    }
+
+    public ImageProvider getProvider(String providerType, String apiKey, String apiEndpoint) {
+        String key = (providerType != null ? providerType.toLowerCase() : "") + ":" + (apiKey != null ? apiKey.hashCode() : "null") + ":" + (apiEndpoint != null ? apiEndpoint.hashCode() : "null");
+        return providerCache.computeIfAbsent(key, k -> createProvider(providerType, apiKey, apiEndpoint));
     }
 
     public void evictAll() {
         providerCache.clear();
     }
 
-    private ImageProvider createProvider(String providerType, String apiKey) {
+    private ImageProvider createProvider(String providerType, String apiKey, String apiEndpoint) {
         if (providerType == null) return getFallbackProvider();
         return switch (providerType.toLowerCase()) {
-            case "openai" -> new OpenAIImageProvider(apiKey, webClientBuilder, objectMapper);
             case "google", "gemini" -> new GoogleImageProvider(apiKey, webClientBuilder, objectMapper);
-            case "stability" -> new StabilityAiImageProvider(apiKey);
+            case "cloudflare" -> new CloudflareWorkersAIImageProvider(apiKey, extractAccountId(apiEndpoint), webClientBuilder);
+            case "openai", "openai-image", "dall-e", "gpt-image" -> new OpenAIVisualProvider(apiKey, webClientBuilder, objectMapper);
+            case "diagram", "diagram-image" -> new DiagramImageProvider();
             default -> {
                 log.warn("Unsupported image provider type: {}, using mock", providerType);
                 yield getFallbackProvider();
             }
         };
+    }
+
+    private static String extractAccountId(String apiEndpoint) {
+        if (apiEndpoint == null || apiEndpoint.isBlank()) return "";
+        try {
+            java.net.URL url = new java.net.URL(apiEndpoint);
+            String path = url.getPath() != null ? url.getPath() : "";
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("/accounts/([^/]+)").matcher(path);
+            if (m.find()) {
+                String id = m.group(1);
+                if (id == null || id.isBlank() || id.contains("{") || id.contains("}") || id.contains("account_id")) {
+                    return "";
+                }
+                return id;
+            }
+        } catch (Exception e) {
+            log.warn("Could not extract account_id from apiEndpoint: {}", e.getMessage());
+        }
+        return "";
     }
 
     public ImageProvider getFallbackProvider() {

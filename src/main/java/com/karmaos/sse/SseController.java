@@ -1,8 +1,9 @@
 package com.karmaos.sse;
 
+import com.karmaos.auth.UserPrincipal;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -13,44 +14,77 @@ import java.util.concurrent.ConcurrentHashMap;
 @RestController
 public class SseController {
 
-    private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<String, SseEmitter>> emittersByUser = new ConcurrentHashMap<>();
 
     @GetMapping(value = "/sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter subscribe(@RequestParam(defaultValue = "") String token) {
+    public SseEmitter subscribe(@AuthenticationPrincipal UserPrincipal user) {
+        UUID userId = user.getId();
         String clientId = UUID.randomUUID().toString();
         SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
-        emitters.put(clientId, emitter);
 
-        emitter.onCompletion(() -> emitters.remove(clientId));
-        emitter.onTimeout(() -> emitters.remove(clientId));
-        emitter.onError(e -> emitters.remove(clientId));
+        emittersByUser.computeIfAbsent(userId, k -> new ConcurrentHashMap<>()).put(clientId, emitter);
+
+        Runnable cleanup = () -> {
+            Map<String, SseEmitter> userEmitters = emittersByUser.get(userId);
+            if (userEmitters != null) {
+                userEmitters.remove(clientId);
+                if (userEmitters.isEmpty()) {
+                    emittersByUser.remove(userId);
+                }
+            }
+        };
+        emitter.onCompletion(cleanup);
+        emitter.onTimeout(cleanup);
+        emitter.onError(e -> cleanup.run());
 
         try {
             emitter.send(SseEmitter.event().name("connected").data("{\"clientId\":\"" + clientId + "\"}"));
         } catch (Exception e) {
-            emitters.remove(clientId);
+            cleanup.run();
         }
 
         return emitter;
     }
 
     public void sendEvent(String eventType, String data) {
-        for (Map.Entry<String, SseEmitter> entry : emitters.entrySet()) {
-            try {
-                entry.getValue().send(SseEmitter.event().name(eventType).data(data));
-            } catch (Exception e) {
-                emitters.remove(entry.getKey());
+        for (Map<String, SseEmitter> userEmitters : emittersByUser.values()) {
+            for (Map.Entry<String, SseEmitter> entry : userEmitters.entrySet()) {
+                try {
+                    entry.getValue().send(SseEmitter.event().name(eventType).data(data));
+                } catch (Exception e) {
+                    userEmitters.remove(entry.getKey());
+                }
             }
         }
     }
 
-    public void sendEvent(String clientId, String eventType, String data) {
-        SseEmitter emitter = emitters.get(clientId);
-        if (emitter != null) {
+    public void sendEvent(UUID userId, String eventType, String data) {
+        Map<String, SseEmitter> userEmitters = emittersByUser.get(userId);
+        if (userEmitters == null) {
+            return;
+        }
+        for (Map.Entry<String, SseEmitter> entry : userEmitters.entrySet()) {
             try {
-                emitter.send(SseEmitter.event().name(eventType).data(data));
+                entry.getValue().send(SseEmitter.event().name(eventType).data(data));
             } catch (Exception e) {
-                emitters.remove(clientId);
+                userEmitters.remove(entry.getKey());
+            }
+        }
+        if (userEmitters.isEmpty()) {
+            emittersByUser.remove(userId);
+        }
+    }
+
+    public void sendEvent(String clientId, String eventType, String data) {
+        for (Map<String, SseEmitter> userEmitters : emittersByUser.values()) {
+            SseEmitter emitter = userEmitters.get(clientId);
+            if (emitter != null) {
+                try {
+                    emitter.send(SseEmitter.event().name(eventType).data(data));
+                } catch (Exception e) {
+                    userEmitters.remove(clientId);
+                }
+                return;
             }
         }
     }

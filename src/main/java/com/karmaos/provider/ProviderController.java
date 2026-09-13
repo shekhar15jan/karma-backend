@@ -40,8 +40,12 @@ public class ProviderController {
 
     @PostMapping("/{id}/test")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> testConnection(@PathVariable UUID id) {
-        return ResponseEntity.ok(ApiResponse.ok(providerService.testConnection(id)));
+    public ResponseEntity<ApiResponse<Map<String, Object>>> testConnection(
+            @PathVariable UUID id,
+            @RequestBody(required = false) Map<String, String> body) {
+        String apiKey = body != null ? body.get("apiKey") : null;
+        String apiEndpoint = body != null ? body.get("apiEndpoint") : null;
+        return ResponseEntity.ok(ApiResponse.ok(providerService.testConnection(id, apiKey, apiEndpoint)));
     }
 
     @PostMapping
@@ -56,6 +60,20 @@ public class ProviderController {
             @PathVariable UUID id,
             @Valid @RequestBody ProviderRequest request) {
         return ResponseEntity.ok(ApiResponse.ok(providerService.update(id, request)));
+    }
+
+    @PostMapping("/{id}/activate")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> activate(@PathVariable UUID id) {
+        providerService.activate(id);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Provider activated"));
+    }
+
+    @PostMapping("/{id}/deactivate")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> deactivate(@PathVariable UUID id) {
+        providerService.deactivate(id);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Provider deactivated"));
     }
 
     @DeleteMapping("/{id}")

@@ -52,10 +52,16 @@ public final class StepContextDistiller {
 
     /**
      * Extracts JSON from a markdown-fenced code block if present; otherwise returns
-     * the input when it already starts with a JSON object/array.
+     * the input when it already starts with a JSON object/array. Prefers the last
+     * strictly-parseable balanced object so reasoning prose before the real JSON is
+     * skipped and schema examples embedded in reasoning are ignored.
      */
     private static String extractJson(String input) {
         if (input == null) return null;
+        String strict = com.karmaos.common.StrictJson.extractLastObjectJson(input);
+        if (strict != null) {
+            return strict;
+        }
         int fence = input.indexOf("```");
         if (fence >= 0) {
             int start = input.indexOf('{', fence);

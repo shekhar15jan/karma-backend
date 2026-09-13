@@ -37,23 +37,42 @@ public class OpenRouterProvider implements LLMProvider {
     public String getName() { return "openrouter"; }
 
     @Override
-    public String getDefaultModel() { return "openai/gpt-4o-mini"; }
+    public String getDefaultModel() { return "google/gemma-2-27b-it:free"; }
 
     @Override
     public List<String> getAvailableModels() {
         return List.of(
-            "openai/gpt-4o",
-            "openai/gpt-4o-mini",
-            "anthropic/claude-3-5-sonnet",
-            "anthropic/claude-3-haiku",
-            "google/gemini-flash-1.5",
-            "google/gemini-pro-1.5",
-            "meta-llama/llama-3.1-70b-instruct",
-            "meta-llama/llama-3.1-8b-instruct",
-            "mistralai/mistral-7b-instruct",
-            "deepseek/deepseek-r1",
-            "qwen/qwen-2.5-72b-instruct"
+            "google/gemma-2-27b-it:free",
+            "google/gemma-2-9b-it:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
+            "qwen/qwen-2.5-72b-instruct:free"
         );
+    }
+
+    @Override
+    public List<String> fetchAvailableModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            JsonNode response = webClient.get()
+                .uri("https://openrouter.ai/api/v1/models")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block();
+            if (response != null && response.hasNonNull("data")) {
+                for (JsonNode m : response.get("data")) {
+                    String id = m.path("id").asText("");
+                    if (!id.isBlank() && id.endsWith(":free") && !result.contains(id)) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("OpenRouter model discovery failed: {}", e.getMessage());
+        }
+        return result.isEmpty() ? getAvailableModels() : result;
     }
 
     @Override

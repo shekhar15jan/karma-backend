@@ -6,6 +6,7 @@ public class ImageRequest {
     private String size = "1024x1024";
     private String quality = "standard";
     private int n = 1;
+    private Long seed;
 
     public ImageRequest() {}
 
@@ -23,4 +24,6 @@ public class ImageRequest {
     public void setQuality(String quality) { this.quality = quality; }
     public int getN() { return n; }
     public void setN(int n) { this.n = n; }
+    public Long getSeed() { return seed; }
+    public void setSeed(Long seed) { this.seed = seed; }
 }

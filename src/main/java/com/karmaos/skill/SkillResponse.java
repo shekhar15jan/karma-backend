@@ -1,5 +1,6 @@
 package com.karmaos.skill;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -17,8 +18,14 @@ public class SkillResponse {
     private UUID id;
     private String name;
     private String description;
+    private String content;
+    private Object validationRules;
+    private Object executionParameters;
     private String category;
     private String status;
+    private int assignedAgentCount;
+    @JsonProperty("isSystem")
+    private boolean isSystem;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

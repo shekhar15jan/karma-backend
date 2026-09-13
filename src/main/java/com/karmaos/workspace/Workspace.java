@@ -27,4 +27,7 @@ public class Workspace extends BaseEntity {
 
     @Column(name = "owner_id", nullable = false)
     private UUID ownerId;
+
+    @Column(name = "default_output_directory", length = 500)
+    private String defaultOutputDirectory;
 }

@@ -23,6 +23,9 @@ public class MissionResponse {
     private String priority;
     private UUID providerId;
     private int progress;
+    private String outputDirectory;
+    private Integer targetDurationSeconds;
+    private String theme;
     private LocalDateTime startedAt;
     private LocalDateTime completedAt;
     private LocalDateTime createdAt;

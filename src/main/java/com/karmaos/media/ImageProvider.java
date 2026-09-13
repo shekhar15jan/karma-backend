@@ -8,4 +8,8 @@ public interface ImageProvider {
     List<String> getAvailableModels();
     ImageResponse generate(ImageRequest request);
     boolean testConnection();
+
+    default List<String> fetchAvailableModels() {
+        return getAvailableModels();
+    }
 }

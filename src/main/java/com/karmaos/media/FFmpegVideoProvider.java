@@ -1,13 +1,11 @@
 package com.karmaos.media;
 
+import com.karmaos.settings.RuntimeSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
-import java.awt.font.FontRenderContext;
-import java.awt.font.TextLayout;
-import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.URI;
@@ -35,6 +33,12 @@ public class FFmpegVideoProvider implements VideoProvider {
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(30))
         .build();
+
+    private final RuntimeSettings runtimeSettings;
+
+    public FFmpegVideoProvider(RuntimeSettings runtimeSettings) {
+        this.runtimeSettings = runtimeSettings;
+    }
 
     @Override
     public String getName() { return "FFmpeg"; }
@@ -112,18 +116,46 @@ public class FFmpegVideoProvider implements VideoProvider {
             int width = parseWidth(request.getResolution());
             int height = parseHeight(request.getResolution());
 
+            Path masterAudio = null;
+            int masterDuration = 0;
+            if (request.getAudioUrl() != null && !request.getAudioUrl().isBlank()) {
+                try {
+                    masterAudio = downloadFile(request.getAudioUrl(), tempDir, "master_audio");
+                    masterDuration = getAudioDurationSeconds(ffmpegPath, masterAudio);
+                    log.info("Master narration audio: {} seconds", masterDuration);
+                } catch (Exception e) {
+                    log.warn("Master audio download failed: {}", e.getMessage());
+                    masterAudio = null;
+                }
+            }
+
             List<Path> segmentFiles = new ArrayList<>();
-            List<Path> allAudios = new ArrayList<>();
             int sceneIdx = 0;
+            int totalWords = 0;
             for (VideoScene scene : request.getScenes()) {
+                if (scene.getText() == null || scene.getText().isBlank()) continue;
+                totalWords += wordCount(scene.getText());
+            }
+            if (totalWords == 0) totalWords = Math.max(1, request.getScenes().size());
+
+            int[] durations = new int[request.getScenes().size()];
+            for (int i = 0; i < request.getScenes().size(); i++) {
+                VideoScene scene = request.getScenes().get(i);
+                if (scene.getText() == null || scene.getText().isBlank()) continue;
+                durations[i] = estimateDurationSeconds(scene.getText());
+            }
+
+            if (masterAudio != null && masterDuration > 0) {
+                durations = distributeDuration(masterDuration, request.getScenes(), totalWords);
+            }
+
+            for (int i = 0; i < request.getScenes().size(); i++) {
+                VideoScene scene = request.getScenes().get(i);
                 sceneIdx++;
                 if (scene.getText() == null || scene.getText().isBlank()) continue;
 
-                String title = request.getTitle() != null ? request.getTitle() : "";
-                Path frame = renderSceneFrame(scene, title, width, height, tempDir, sceneIdx);
-                int duration = scene.getDurationSeconds() > 0
-                    ? scene.getDurationSeconds()
-                    : estimateDurationSeconds(scene.getText());
+                Path frame = renderSceneFrame(scene, width, height, tempDir, sceneIdx);
+                int duration = Math.max(1, durations[i]);
 
                 Path audio = null;
                 if (scene.getAudioUrl() != null && !scene.getAudioUrl().isBlank()) {
@@ -132,9 +164,6 @@ public class FFmpegVideoProvider implements VideoProvider {
                     } catch (Exception e) {
                         log.warn("Scene {} audio download failed, rendering silently: {}", sceneIdx, e.getMessage());
                     }
-                }
-                if (audio != null && Files.exists(audio)) {
-                    allAudios.add(audio);
                 }
 
                 Path segment = tempDir.resolve("seg_" + sceneIdx + ".mp4");
@@ -160,19 +189,6 @@ public class FFmpegVideoProvider implements VideoProvider {
             cmd.add("-i");
             cmd.add(concatFile.toAbsolutePath().toString());
 
-            Path mixedAudio = null;
-            if (!allAudios.isEmpty()) {
-                try {
-                    mixedAudio = mixAudios(ffmpegPath, allAudios, tempDir.resolve("mixed.mp3"));
-                    if (mixedAudio != null && Files.exists(mixedAudio)) {
-                        cmd.add("-i");
-                        cmd.add(mixedAudio.toAbsolutePath().toString());
-                    }
-                } catch (Exception e) {
-                    log.warn("Audio mix failed, producing silent video: {}", e.getMessage());
-                }
-            }
-
             cmd.add("-c:v");
             cmd.add("libx264");
             cmd.add("-preset");
@@ -182,20 +198,40 @@ public class FFmpegVideoProvider implements VideoProvider {
             cmd.add("-pix_fmt");
             cmd.add("yuv420p");
 
-            if (mixedAudio != null && Files.exists(mixedAudio)) {
-                cmd.add("-c:a");
-                cmd.add("aac");
-                cmd.add("-b:a");
-                cmd.add("128k");
-                cmd.add("-shortest");
-            }
-
             cmd.add(output.toAbsolutePath().toString());
             log.info("Scene concat command: {}", String.join(" ", cmd));
 
             if (!runFFmpeg(cmd)) {
                 return VideoResponse.error("FFmpeg scene assembly failed");
             }
+
+            if (masterAudio != null && Files.exists(masterAudio)) {
+                Path finalOutput = tempDir.resolve("final.mp4");
+                List<String> muxCmd = new ArrayList<>();
+                muxCmd.add(ffmpegPath);
+                muxCmd.add("-y");
+                muxCmd.add("-i");
+                muxCmd.add(output.toAbsolutePath().toString());
+                muxCmd.add("-i");
+                muxCmd.add(masterAudio.toAbsolutePath().toString());
+                muxCmd.add("-map");
+                muxCmd.add("0:v:0");
+                muxCmd.add("-map");
+                muxCmd.add("1:a:0");
+                muxCmd.add("-c:v");
+                muxCmd.add("copy");
+                muxCmd.add("-c:a");
+                muxCmd.add("aac");
+                muxCmd.add("-b:a");
+                muxCmd.add("128k");
+                muxCmd.add("-shortest");
+                muxCmd.add(finalOutput.toAbsolutePath().toString());
+                log.info("Audio mux command: {}", String.join(" ", muxCmd));
+                if (runFFmpeg(muxCmd) && Files.exists(finalOutput) && Files.size(finalOutput) > 0) {
+                    Files.move(finalOutput, output, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+
             if (!Files.exists(output) || Files.size(output) == 0) {
                 return VideoResponse.error("FFmpeg produced no output file");
             }
@@ -210,7 +246,60 @@ public class FFmpegVideoProvider implements VideoProvider {
         }
     }
 
-    private Path renderSceneFrame(VideoScene scene, String title, int width, int height,
+    private int[] distributeDuration(int masterDuration, List<VideoScene> scenes, int totalWords) {
+        int[] durations = new int[scenes.size()];
+        int allocated = 0;
+        int last = -1;
+        for (int i = 0; i < scenes.size(); i++) {
+            VideoScene scene = scenes.get(i);
+            if (scene.getText() == null || scene.getText().isBlank()) continue;
+            int words = wordCount(scene.getText());
+            int d = (int) Math.round((double) masterDuration * words / totalWords);
+            if (d < 1) d = 1;
+            durations[i] = d;
+            allocated += d;
+            last = i;
+        }
+        if (last >= 0 && allocated < masterDuration) {
+            durations[last] += (masterDuration - allocated);
+        } else if (last >= 0 && allocated > masterDuration) {
+            int diff = allocated - masterDuration;
+            durations[last] = Math.max(1, durations[last] - diff);
+        }
+        return durations;
+    }
+
+    private int wordCount(String text) {
+        if (text == null || text.isBlank()) return 0;
+        return text.trim().split("\\s+").length;
+    }
+
+    private int getAudioDurationSeconds(String ffmpegPath, Path audioFile) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                audioFile.toAbsolutePath().toString()
+            );
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String out = readStream(p.getInputStream());
+            boolean ok = p.waitFor(10, TimeUnit.SECONDS);
+            if (ok && p.exitValue() == 0) {
+                String line = out.trim();
+                if (!line.isBlank()) {
+                    double sec = Double.parseDouble(line);
+                    return (int) Math.round(sec);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Could not probe audio duration: {}", e.getMessage());
+        }
+        return 0;
+    }
+
+    private Path renderSceneFrame(VideoScene scene, int width, int height,
                                   Path tempDir, int idx) throws IOException {
         BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = canvas.createGraphics();
@@ -225,8 +314,6 @@ public class FFmpegVideoProvider implements VideoProvider {
                 BufferedImage bgImg = ImageIO.read(bg.toFile());
                 if (bgImg != null) {
                     g.drawImage(bgImg, 0, 0, width, height, null);
-                    g.setColor(new Color(0, 0, 0, 150));
-                    g.fillRect(0, 0, width, height);
                 }
             } catch (Exception e) {
                 log.warn("Scene {} background failed, using gradient: {}", idx, e.getMessage());
@@ -234,19 +321,6 @@ public class FFmpegVideoProvider implements VideoProvider {
             }
         } else {
             paintGradient(g, width, height, idx);
-        }
-
-        if (title != null && !title.isBlank()) {
-            g.setFont(new Font("SansSerif", Font.BOLD, Math.max(28, width / 42)));
-            g.setColor(new Color(255, 255, 255, 220));
-            drawCenteredText(g, title, width, (int) (height * 0.10), width - 200);
-        }
-
-        String text = scene.getText();
-        if (text != null && !text.isBlank()) {
-            g.setFont(new Font("SansSerif", Font.BOLD, Math.max(32, width / 32)));
-            g.setColor(Color.WHITE);
-            drawWrappedCenteredText(g, text, width, (int) (height * 0.42), (int) (height * 0.5), width - 240);
         }
 
         g.dispose();
@@ -261,53 +335,6 @@ public class FFmpegVideoProvider implements VideoProvider {
         Color c2 = Color.getHSBColor(((base + 60) % 360) / 360f, 0.55f, 0.30f);
         g.setPaint(new GradientPaint(0, 0, c1, width, height, c2));
         g.fillRect(0, 0, width, height);
-    }
-
-    private void drawCenteredText(Graphics2D g, String text, int width, int y, int maxWidth) {
-        Font font = g.getFont();
-        FontRenderContext frc = g.getFontRenderContext();
-        TextLayout layout = new TextLayout(text, font, frc);
-        Rectangle2D bounds = layout.getBounds();
-        float x = (float) ((width - bounds.getWidth()) / 2 - bounds.getX());
-        layout.draw(g, x, y);
-    }
-
-    private void drawWrappedCenteredText(Graphics2D g, String text, int width, int centerY,
-                                         int maxHeight, int maxWidth) {
-        List<String> lines = wrapText(text, maxWidth, g.getFontMetrics());
-        int lineHeight = g.getFontMetrics().getHeight();
-        int totalHeight = lines.size() * lineHeight;
-        if (totalHeight > maxHeight) {
-            while (totalHeight > maxHeight && lines.size() > 1) {
-                lines.remove(lines.size() - 1);
-                totalHeight = lines.size() * lineHeight;
-            }
-        }
-        int y = centerY - totalHeight / 2 + g.getFontMetrics().getAscent();
-        for (String line : lines) {
-            drawCenteredText(g, line, width, y, maxWidth);
-            y += lineHeight;
-        }
-    }
-
-    private List<String> wrapText(String text, int maxWidth, FontMetrics fm) {
-        List<String> result = new ArrayList<>();
-        for (String paragraph : text.split("\n")) {
-            if (paragraph.isBlank()) continue;
-            String[] words = paragraph.split("\\s+");
-            StringBuilder line = new StringBuilder();
-            for (String word : words) {
-                String candidate = line.length() == 0 ? word : line + " " + word;
-                if (fm.stringWidth(candidate) > maxWidth && line.length() > 0) {
-                    result.add(line.toString());
-                    line = new StringBuilder(word);
-                } else {
-                    line = new StringBuilder(candidate);
-                }
-            }
-            if (line.length() > 0) result.add(line.toString());
-        }
-        return result;
     }
 
     private boolean buildSceneSegment(String ffmpegPath, Path frame, Path audio,
@@ -406,10 +433,11 @@ public class FFmpegVideoProvider implements VideoProvider {
             pb.redirectErrorStream(true);
             Process process = pb.start();
             String processOutput = readStream(process.getInputStream());
-            boolean finished = process.waitFor(300, TimeUnit.SECONDS);
+            int timeoutSeconds = 1200;
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                log.error("FFmpeg timed out after 5 minutes");
+                log.error("FFmpeg timed out after {} minutes", timeoutSeconds / 60);
                 return false;
             }
             if (process.exitValue() != 0) {

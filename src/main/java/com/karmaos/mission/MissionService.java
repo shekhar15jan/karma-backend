@@ -1,6 +1,7 @@
 package com.karmaos.mission;
 
 import com.karmaos.access.OwnershipService;
+import com.karmaos.artifact.ArtifactStorageService;
 import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
@@ -17,7 +18,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -34,24 +34,22 @@ public class MissionService {
     private final ExecutionRepository executionRepository;
     private final OwnershipService ownershipService;
     private final ProviderRepository providerRepository;
-
-    private static final java.util.Map<String, String> MISSION_TYPE_TO_FLOW_NAME = java.util.Map.of(
-        "VIDEO", "Video Generation Flow",
-        "BLOG", "Blog Generation Flow",
-        "SCRIPT", "Script Generation Flow"
-    );
+    private final ArtifactStorageService artifactStorageService;
 
     private static final Set<String> ALLOWED_MISSION_TYPES =
             Set.of("VIDEO", "BLOG", "SCRIPT", "VOICE", "THUMBNAIL", "WORKFLOW");
     private static final Set<String> ALLOWED_PRIORITIES = Set.of("LOW", "MEDIUM", "HIGH", "URGENT");
+    private static final Set<String> ALLOWED_THEMES =
+            Set.of("whiteboard", "corporate", "minimal", "dark", "glass", "technical", "codeatcloud", "auto");
 
     public MissionService(MissionRepository missionRepository,
                           MissionFlowRepository missionFlowRepository,
                           FlowRepository flowRepository,
                           ExecutionOrchestrator orchestrator,
-                          ExecutionRepository executionRepository,
-                          OwnershipService ownershipService,
-                          ProviderRepository providerRepository) {
+ExecutionRepository executionRepository,
+                           OwnershipService ownershipService,
+                           ProviderRepository providerRepository,
+                           ArtifactStorageService artifactStorageService) {
         this.missionRepository = missionRepository;
         this.missionFlowRepository = missionFlowRepository;
         this.flowRepository = flowRepository;
@@ -59,6 +57,7 @@ public class MissionService {
         this.executionRepository = executionRepository;
         this.ownershipService = ownershipService;
         this.providerRepository = providerRepository;
+        this.artifactStorageService = artifactStorageService;
     }
 
     public List<MissionResponse> listByProject(UUID projectId, UserPrincipal user) {
@@ -85,6 +84,9 @@ public class MissionService {
         mission.setMissionType(normalizeType(request.getMissionType()));
         mission.setPriority(normalizePriority(request.getPriority()));
         mission.setProviderId(request.getProviderId());
+        mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
+        mission.setTargetDurationSeconds(normalizeDuration(request.getTargetDurationSeconds()));
+        mission.setTheme(normalizeTheme(request.getTheme()));
         mission.setStatus("DRAFT");
         mission.setProgress(0);
         mission = missionRepository.save(mission);
@@ -126,38 +128,54 @@ public class MissionService {
         return p;
     }
 
+    private Integer normalizeDuration(Integer targetDurationSeconds) {
+        if (targetDurationSeconds == null || targetDurationSeconds <= 0) {
+            return null;
+        }
+        return Math.max(30, targetDurationSeconds);
+    }
+
+    private String normalizeTheme(String theme) {
+        if (theme == null || theme.isBlank()) {
+            return "whiteboard";
+        }
+        String t = theme.trim().toLowerCase();
+        if (!ALLOWED_THEMES.contains(t)) {
+            throw ErrorCode.BAD_REQUEST.exception("Unsupported theme: " + theme);
+        }
+        return t;
+    }
+
     private void linkFlowsToMission(Mission mission, MissionRequest request) {
         List<UUID> selectedFlowIds = request.getSelectedFlowIds();
 
-        if (selectedFlowIds != null && !selectedFlowIds.isEmpty()) {
-            Set<UUID> seen = new LinkedHashSet<>();
-            int order = 0;
-            for (UUID flowId : selectedFlowIds) {
-                if (flowId == null || !seen.add(flowId)) {
-                    continue;
-                }
-                if (flowRepository.findByIdAndStatus(flowId, "ACTIVE").isEmpty()) {
-                    throw new ApiException(ErrorCode.BAD_REQUEST, "Flow not found or inactive: " + flowId);
-                }
+        if (selectedFlowIds == null || selectedFlowIds.isEmpty()) {
+            List<Flow> defaultFlows = flowRepository.findByCategoryAndStatus(mission.getMissionType(), "ACTIVE");
+            if (!defaultFlows.isEmpty()) {
+                Flow defaultFlow = defaultFlows.get(0);
                 MissionFlow mf = new MissionFlow();
-                mf.setId(new MissionFlowId(mission.getId(), flowId));
-                mf.setExecOrder(order++);
+                mf.setId(new MissionFlowId(mission.getId(), defaultFlow.getId()));
+                mf.setExecOrder(0);
                 mf.setStatus("ACTIVE");
                 missionFlowRepository.save(mf);
             }
-        } else {
-            String flowName = MISSION_TYPE_TO_FLOW_NAME.get(mission.getMissionType());
-            if (flowName != null) {
-                flowRepository.findByNameContainingIgnoreCaseAndStatus(flowName, "ACTIVE").stream()
-                    .min(Comparator.comparing(Flow::getCreatedAt))
-                    .ifPresent(flow -> {
-                        MissionFlow mf = new MissionFlow();
-                        mf.setId(new MissionFlowId(mission.getId(), flow.getId()));
-                        mf.setExecOrder(1);
-                        mf.setStatus("ACTIVE");
-                        missionFlowRepository.save(mf);
-                    });
+            return;
+        }
+
+        Set<UUID> seen = new LinkedHashSet<>();
+        int order = 0;
+        for (UUID flowId : selectedFlowIds) {
+            if (flowId == null || !seen.add(flowId)) {
+                continue;
             }
+            if (flowRepository.findByIdAndStatus(flowId, "ACTIVE").isEmpty()) {
+                throw new ApiException(ErrorCode.BAD_REQUEST, "Flow not found or inactive: " + flowId);
+            }
+            MissionFlow mf = new MissionFlow();
+            mf.setId(new MissionFlowId(mission.getId(), flowId));
+            mf.setExecOrder(order++);
+            mf.setStatus("ACTIVE");
+            missionFlowRepository.save(mf);
         }
     }
 
@@ -174,6 +192,11 @@ public class MissionService {
         }
         validateProvider(request.getProviderId());
         mission.setProviderId(request.getProviderId());
+        mission.setOutputDirectory(artifactStorageService.normalizeFolder(request.getOutputDirectory()));
+        mission.setTargetDurationSeconds(normalizeDuration(request.getTargetDurationSeconds()));
+        if (request.getTheme() != null && !request.getTheme().isBlank()) {
+            mission.setTheme(normalizeTheme(request.getTheme()));
+        }
         mission = missionRepository.save(mission);
         relinkFlowsToMission(mission, request);
         return toResponse(mission);
@@ -231,6 +254,9 @@ public class MissionService {
                 .priority(m.getPriority())
                 .providerId(m.getProviderId())
                 .progress(m.getProgress())
+                .outputDirectory(m.getOutputDirectory())
+                .targetDurationSeconds(m.getTargetDurationSeconds())
+                .theme(m.getTheme())
                 .startedAt(m.getStartedAt())
                 .completedAt(m.getCompletedAt())
                 .createdAt(m.getCreatedAt())

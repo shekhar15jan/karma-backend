@@ -4,8 +4,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
+import com.karmaos.llm.LLMProvider;
 import com.karmaos.llm.LLMProviderFactory;
+import com.karmaos.llm.LLMRequest;
+import com.karmaos.llm.LLMResponse;
 import com.karmaos.media.ImageProviderFactory;
+import com.karmaos.media.MusicProviderFactory;
 import com.karmaos.media.VideoProviderFactory;
 import com.karmaos.media.VoiceProviderFactory;
 import org.slf4j.Logger;
@@ -14,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -26,16 +31,20 @@ public class ProviderService {
 
     private static final Logger log = LoggerFactory.getLogger(ProviderService.class);
 
-    private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
-            "openai", "anthropic", "google", "gemini", "groq", "openrouter", "opencode",
-            "stability", "elevenlabs", "edge-tts", "edge", "ffmpeg");
+private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
+            "google", "gemini", "groq", "openrouter", "opencode",
+            "edge-tts", "edge", "remotion", "google-music", "cloudflare");
 
     private static final Set<String> LLM_TYPES = Set.of(
-            "openai", "anthropic", "google", "gemini", "groq", "openrouter", "opencode");
+            "google", "gemini", "groq", "openrouter", "opencode");
 
-    private static final Set<String> VOICE_TYPES = Set.of("elevenlabs", "edge-tts", "edge");
+    private static final Set<String> VOICE_TYPES = Set.of("edge-tts", "edge");
 
-    private static final Set<String> IMAGE_TYPES = Set.of("stability", "google", "gemini", "openai");
+    private static final Set<String> IMAGE_TYPES = Set.of("google", "gemini", "cloudflare");
+
+    private static final Set<String> MUSIC_TYPES = Set.of("google-music");
+
+    private static final Set<String> KEYLESS_TYPES = Set.of("edge-tts", "edge", "remotion");
 
     private final ProviderRepository providerRepository;
     private final ObjectMapper objectMapper;
@@ -44,6 +53,10 @@ public class ProviderService {
     private final ImageProviderFactory imageProviderFactory;
     private final VoiceProviderFactory voiceProviderFactory;
     private final VideoProviderFactory videoProviderFactory;
+    private final MusicProviderFactory musicProviderFactory;
+
+    @org.springframework.beans.factory.annotation.Value("${media.visual-only:true}")
+    private boolean visualOnly;
 
     public ProviderService(ProviderRepository providerRepository,
                            ObjectMapper objectMapper,
@@ -51,7 +64,8 @@ public class ProviderService {
                            LLMProviderFactory llmProviderFactory,
                            ImageProviderFactory imageProviderFactory,
                            VoiceProviderFactory voiceProviderFactory,
-                           VideoProviderFactory videoProviderFactory) {
+                           VideoProviderFactory videoProviderFactory,
+                           MusicProviderFactory musicProviderFactory) {
         this.providerRepository = providerRepository;
         this.objectMapper = objectMapper;
         this.keyCipher = keyCipher;
@@ -59,6 +73,7 @@ public class ProviderService {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
         this.videoProviderFactory = videoProviderFactory;
+        this.musicProviderFactory = musicProviderFactory;
     }
 
     public List<ProviderResponse> list() {
@@ -128,54 +143,148 @@ public class ProviderService {
         return toResponse(provider);
     }
 
-    public Map<String, Object> testConnection(UUID id) {
+    public Map<String, Object> testConnection(UUID id, String testApiKey, String testApiEndpoint) {
         Provider provider = findActiveAiProvider(id);
 
+        String apiKey = (testApiKey != null && !testApiKey.isBlank())
+                ? testApiKey.trim()
+                : keyCipher.decrypt(provider.getEncryptedApiKey());
+        String apiEndpoint = (testApiEndpoint != null && !testApiEndpoint.isBlank())
+                ? testApiEndpoint.trim()
+                : provider.getApiEndpoint();
+
+        Map<String, Object> result = runConnectionTest(provider, apiKey, apiEndpoint);
+        boolean ok = (Boolean) result.get("success");
+        if (ok) {
+            if (testApiKey != null && !testApiKey.isBlank()) {
+                provider.setEncryptedApiKey(keyCipher.encrypt(testApiKey.trim()));
+            }
+            if (testApiEndpoint != null && !testApiEndpoint.isBlank()) {
+                provider.setApiEndpoint(trimToNull(testApiEndpoint));
+            }
+        }
+        provider.setStatus(ok ? "CONNECTED" : "ERROR");
+        providerRepository.save(provider);
+        Map<String, Object> out = new HashMap<>(result);
+        out.put("status", provider.getStatus());
+        return out;
+    }
+
+    /**
+     * Runs the provider-specific connection probe without persisting. Returns a map of
+     * success/message/modelCount so callers (Test and activate) behave identically.
+     */
+    private Map<String, Object> runConnectionTest(Provider provider, String apiKey, String apiEndpoint) {
         String type = normalizeType(provider.getProviderType());
         if (!SUPPORTED_PROVIDER_TYPES.contains(type)) {
-            return Map.of("success", false, "message", "Unsupported provider type: " + provider.getProviderType());
+            return Map.of("success", false, "message", "Unsupported provider type: " + provider.getProviderType(), "modelCount", 0);
         }
-
-        String apiKey = keyCipher.decrypt(provider.getEncryptedApiKey());
 
         try {
             boolean ok;
             String detail = "";
-            if (LLM_TYPES.contains(type)) {
-                if (apiKey.isBlank()) {
-                    return fail(provider, "API key is required to test this provider");
+            if (hasImagenModel(provider) && !apiKey.isBlank()) {
+                if (visualOnly) {
+                    return Map.of("success", false, "message", "disabled: visual-only mode", "modelCount", 0);
                 }
-                ok = llmProviderFactory
-                        .getProvider(type, apiKey, provider.getApiEndpoint())
-                        .testConnection();
+                ok = imageProviderFactory.getProvider(type, apiKey).testConnection();
+            } else if (MUSIC_TYPES.contains(type)) {
+                if (apiKey.isBlank()) {
+                    return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
+                }
+                ok = musicProviderFactory.getProvider(type, apiKey).testConnection();
+            } else if (LLM_TYPES.contains(type)) {
+                if (apiKey.isBlank()) {
+                    return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
+                }
+                LLMProvider llmProvider = llmProviderFactory
+                        .getProvider(type, apiKey, apiEndpoint);
+                String probeModel = firstConfiguredModel(provider);
+                LLMRequest probeRequest = new LLMRequest("You are a test bot.", "Reply with just: OK");
+                probeRequest.setModel(probeModel != null ? probeModel : llmProvider.getDefaultModel());
+                LLMResponse probeResponse = llmProvider.chat(probeRequest);
+                ok = probeResponse != null && probeResponse.isSuccess();
+                if (!ok && probeResponse != null && probeResponse.getErrorMessage() != null) {
+                    String err = probeResponse.getErrorMessage().trim();
+                    detail = err.length() > 250 ? err.substring(0, 250) + "..." : err;
+                }
             } else if (VOICE_TYPES.contains(type)) {
                 if (apiKey.isBlank() && !"edge-tts".equals(type) && !"edge".equals(type)) {
-                    return fail(provider, "API key is required to test this provider");
+                    return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
                 }
                 ok = voiceProviderFactory.getProvider(type, apiKey).testConnection();
             } else if (IMAGE_TYPES.contains(type)) {
-                if (apiKey.isBlank()) {
-                    return fail(provider, "API key is required to test this provider");
+                if (visualOnly) {
+                    return Map.of("success", false, "message", "disabled: visual-only mode", "modelCount", 0);
                 }
-                ok = imageProviderFactory.getProvider(type, apiKey).testConnection();
-            } else if ("ffmpeg".equals(type)) {
+                if (apiKey.isBlank()) {
+                    return Map.of("success", false, "message", "API key is required to test this provider", "modelCount", 0);
+                }
+                ok = imageProviderFactory.getProvider(type, apiKey, apiEndpoint).testConnection();
+            } else if ("remotion".equals(type)) {
                 ok = videoProviderFactory.getProvider(type, apiKey).testConnection();
             } else {
-                ok = false;
-                detail = "Unsupported provider type";
+                return Map.of("success", false, "message", "Unsupported provider type", "modelCount", 0);
             }
-            provider.setStatus(ok ? "CONNECTED" : "ERROR");
-            providerRepository.save(provider);
+            int syncedModels = 0;
+            if (ok) {
+                syncedModels = syncAvailableModels(provider, type, apiKey, apiEndpoint);
+            }
             return Map.of(
                     "success", ok,
-                    "message", ok ? "Connection successful" : ("Connection test failed" + (detail.isBlank() ? "" : ": " + detail))
-            );
+                    "message", ok ? "Connection successful" : ("Connection test failed" + (detail.isBlank() ? "" : ": " + detail)),
+                    "modelCount", syncedModels);
         } catch (Exception e) {
             log.warn("Connection test failed for provider {}", provider.getName(), e);
-            provider.setStatus("ERROR");
-            providerRepository.save(provider);
-            return Map.of("success", false, "message", "Connection failed: " + e.getMessage());
+            return Map.of("success", false, "message", "Connection failed: " + e.getMessage(), "modelCount", 0);
         }
+    }
+
+    /**
+     * After a successful connection test, fetch the live model list for the key and
+     * persist it cheapest-first. Non-fatal: a failed sync never flips the status.
+     */
+    private int syncAvailableModels(Provider provider, String type, String apiKey, String apiEndpoint) {
+        try {
+            List<String> fetched = fetchModelsFor(provider, type, apiKey, apiEndpoint);
+            if (fetched == null || fetched.isEmpty()) {
+                return 0;
+            }
+            List<String> ordered = ModelRanker.orderCheapestFirst(fetched);
+            provider.setModels(objectMapper.writeValueAsString(ordered));
+            return ordered.size();
+        } catch (Exception e) {
+            log.warn("Model sync failed for provider {}: {}", provider.getName(), e.getMessage());
+            return 0;
+        }
+    }
+
+    private List<String> fetchModelsFor(Provider provider, String type, String apiKey, String apiEndpoint) {
+        if ("remotion".equals(type) || "edge".equals(type) || "edge-tts".equals(type)) {
+            return null;
+        }
+        if (hasImagenModel(provider)) {
+            if (visualOnly) {
+                return null;
+            }
+            return imageProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
+        }
+        if (MUSIC_TYPES.contains(type)) {
+            return musicProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
+        }
+        if (LLM_TYPES.contains(type)) {
+            return llmProviderFactory.getProvider(type, apiKey, apiEndpoint).fetchAvailableModels();
+        }
+        if (VOICE_TYPES.contains(type)) {
+            return voiceProviderFactory.getProvider(type, apiKey).fetchAvailableModels();
+        }
+        if (IMAGE_TYPES.contains(type)) {
+            if (visualOnly) {
+                return null;
+            }
+            return imageProviderFactory.getProvider(type, apiKey, apiEndpoint).fetchAvailableModels();
+        }
+        return null;
     }
 
     @Transactional
@@ -183,6 +292,44 @@ public class ProviderService {
         Provider provider = findActiveAiProvider(id);
         evictProviderCaches();
         provider.softDelete();
+        providerRepository.save(provider);
+    }
+
+    @Transactional
+    public void activate(UUID id) {
+        Provider provider = findActiveAiProvider(id);
+        String type = normalizeType(provider.getProviderType());
+        if (keyRequired(type) && !hasKey(provider)) {
+            throw ErrorCode.BAD_REQUEST.exception("Configure an API key before connecting this provider");
+        }
+        String apiKey = keyCipher.decrypt(provider.getEncryptedApiKey());
+        String apiEndpoint = provider.getApiEndpoint();
+        Map<String, Object> result = runConnectionTest(provider, apiKey, apiEndpoint);
+        if (!(Boolean) result.get("success")) {
+            provider.setStatus("ERROR");
+            providerRepository.save(provider);
+            evictProviderCaches();
+            throw ErrorCode.BAD_REQUEST.exception((String) result.get("message"));
+        }
+        provider.setStatus("CONNECTED");
+        evictProviderCaches();
+        providerRepository.save(provider);
+    }
+
+    private boolean hasKey(Provider p) {
+        byte[] key = p.getEncryptedApiKey();
+        return key != null && key.length > 0;
+    }
+
+    private boolean keyRequired(String type) {
+        return !KEYLESS_TYPES.contains(normalizeType(type));
+    }
+
+    @Transactional
+    public void deactivate(UUID id) {
+        Provider provider = findActiveAiProvider(id);
+        provider.setStatus("DISCONNECTED");
+        evictProviderCaches();
         providerRepository.save(provider);
     }
 
@@ -203,12 +350,7 @@ public class ProviderService {
         imageProviderFactory.evictAll();
         voiceProviderFactory.evictAll();
         videoProviderFactory.evictAll();
-    }
-
-    private Map<String, Object> fail(Provider provider, String message) {
-        provider.setStatus("ERROR");
-        providerRepository.save(provider);
-        return Map.of("success", false, "message", message);
+        musicProviderFactory.evictAll();
     }
 
     private boolean isPublishing(Provider p) {
@@ -224,6 +366,34 @@ public class ProviderService {
             return null;
         }
         return value.trim();
+    }
+
+    private String firstConfiguredModel(Provider provider) {
+        try {
+            List<String> models = objectMapper.readValue(provider.getModels(), new TypeReference<List<String>>() {});
+            if (models != null) {
+                for (String m : models) {
+                    if (m != null && !m.isBlank()) {
+                        return m.trim();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private boolean hasImagenModel(Provider provider) {
+        try {
+            List<String> models = objectMapper.readValue(provider.getModels(), new TypeReference<List<String>>() {});
+            if (models != null) {
+                for (String m : models) {
+                    if (m != null && m.toLowerCase(Locale.ROOT).contains("imagen")) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return provider.getName() != null && provider.getName().toLowerCase(Locale.ROOT).contains("imagen");
     }
 
     private void applyConfiguration(Provider provider, ProviderRequest request) {
@@ -253,6 +423,8 @@ public class ProviderService {
                 .models(models)
                 .capabilities(capabilities)
                 .status(p.getStatus())
+                .apiKeyConfigured(hasKey(p))
+                .keyRequired(keyRequired(p.getProviderType()))
                 .createdAt(p.getCreatedAt())
                 .updatedAt(p.getUpdatedAt())
                 .build();

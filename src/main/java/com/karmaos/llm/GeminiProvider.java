@@ -8,6 +8,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -31,11 +32,16 @@ public class GeminiProvider implements LLMProvider {
     public String getName() { return "gemini"; }
 
     @Override
-    public String getDefaultModel() { return "gemini-1.5-pro"; }
+    public String getDefaultModel() { return "gemini-3.5-flash"; }
 
     @Override
     public List<String> getAvailableModels() {
-        return List.of("gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash");
+        return List.of("gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-pro");
+    }
+
+    @Override
+    public List<String> fetchAvailableModels() {
+        return listChatModels();
     }
 
     @Override
@@ -43,7 +49,8 @@ public class GeminiProvider implements LLMProvider {
         long start = System.currentTimeMillis();
         try {
             String model = request.getModel() != null ? request.getModel() : getDefaultModel();
-            String url = API_URL + "/" + model + ":generateContent?key=" + apiKey;
+            // Security: API key via header, NOT URL query param (prevents leakage in access logs)
+            String url = API_URL + "/" + model + ":generateContent";
 
             List<Map<String, Object>> contents = new ArrayList<>();
 
@@ -61,19 +68,28 @@ public class GeminiProvider implements LLMProvider {
                 "parts", List.of(Map.of("text", userMsg))
             ));
 
-            Map<String, Object> requestBody = Map.of(
-                "contents", contents,
-                "generationConfig", Map.of(
-                    "temperature", request.getTemperature(),
-                    "maxOutputTokens", request.getMaxTokens()
-                ),
-                "systemInstruction", request.getSystemPrompt() != null
+            boolean grounding = request.getAdditionalParams() != null
+                    && Boolean.TRUE.equals(request.getAdditionalParams().get("googleSearchGrounding"));
+
+            Map<String, Object> generationConfig = new LinkedHashMap<>();
+            generationConfig.put("maxOutputTokens", request.getMaxTokens());
+            if (!grounding) {
+                generationConfig.put("temperature", request.getTemperature());
+            }
+
+            Map<String, Object> requestBody = new LinkedHashMap<>();
+            requestBody.put("contents", contents);
+            requestBody.put("generationConfig", generationConfig);
+            requestBody.put("systemInstruction", request.getSystemPrompt() != null
                     ? Map.of("parts", List.of(Map.of("text", request.getSystemPrompt())))
-                    : null
-            );
+                    : null);
+            if (grounding) {
+                requestBody.put("tools", List.of(Map.of("googleSearchRetrieval", Map.of())));
+            }
 
             JsonNode response = webClient.post()
                 .uri(url)
+                .header("x-goog-api-key", apiKey)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(requestBody)
                 .retrieve()
@@ -92,6 +108,10 @@ public class GeminiProvider implements LLMProvider {
             int promptTokens = usageMetadata != null ? usageMetadata.get("promptTokenCount").asInt() : 0;
             int completionTokens = usageMetadata != null ? usageMetadata.get("candidatesTokenCount").asInt() : 0;
 
+            if (grounding) {
+                content = appendGroundingSources(content, response);
+            }
+
             return LLMResponse.ok(content, model, promptTokens, completionTokens, elapsed);
 
         } catch (Exception e) {
@@ -109,13 +129,165 @@ public class GeminiProvider implements LLMProvider {
         return response;
     }
 
+    public List<Double> embed(String text) {
+        return embed(text, "text-embedding-004");
+    }
+
+    public List<Double> embed(String text, String model) {
+        try {
+            if (text == null || text.isBlank()) {
+                return List.of();
+            }
+            // Security: API key via header, NOT URL query param
+            String url = API_URL + "/" + model + ":embedContent";
+            Map<String, Object> requestBody = Map.of(
+                "model", "models/" + model,
+                "content", Map.of("parts", List.of(Map.of("text", text)))
+            );
+
+            JsonNode response = webClient.post()
+                .uri(url)
+                .header("x-goog-api-key", apiKey)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(requestBody)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block();
+
+            if (response == null || !response.has("embedding")) {
+                log.warn("Gemini embed returned no embedding");
+                return List.of();
+            }
+            List<Double> values = new ArrayList<>();
+            for (JsonNode v : response.path("embedding").path("values")) {
+                values.add(v.asDouble());
+            }
+            return values;
+        } catch (org.springframework.web.reactive.function.client.WebClientResponseException e) {
+            log.warn("Gemini embed failed: {} — body: {}", e.getMessage(), e.getResponseBodyAsString());
+            return List.of();
+        } catch (Exception e) {
+            log.warn("Gemini embed failed: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private String appendGroundingSources(String content, JsonNode response) {
+        JsonNode groundingChunks = response.path("groundingMetadata").path("groundingChunks");
+        if (!groundingChunks.isArray() || groundingChunks.isEmpty()) {
+            return content;
+        }
+        List<String> sources = new ArrayList<>();
+        for (JsonNode chunk : groundingChunks) {
+            JsonNode web = chunk.path("web");
+            String uri = web.path("uri").asText();
+            String title = web.path("title").asText();
+            if (!uri.isBlank()) {
+                sources.add("- " + (title.isBlank() ? uri : title + " (" + uri + ")"));
+            }
+        }
+        if (sources.isEmpty()) {
+            return content;
+        }
+        return content + "\n\nSources:\n" + String.join("\n", sources);
+    }
+
     @Override
     public boolean testConnection() {
+        return testConnection(null);
+    }
+
+    @Override
+    public boolean testConnection(String model) {
         try {
-            LLMResponse resp = chat(new LLMRequest("You are a test bot.", "Reply with just: OK"));
-            return resp.isSuccess();
+            List<String> available = listChatModels();
+            if (available.isEmpty()) {
+                log.warn("Gemini connection test failed: no generateContent-capable model available for this key");
+                return false;
+            }
+            if (model != null && !model.isBlank() && probe(model)) {
+                return true;
+            }
+            for (String candidate : available) {
+                if (probe(candidate)) {
+                    return true;
+                }
+            }
+            return false;
         } catch (Exception e) {
+            log.warn("Gemini connection test failed: {}", e.getMessage());
             return false;
         }
+    }
+
+    private boolean probe(String model) {
+        LLMRequest request = new LLMRequest("You are a test bot.", "Reply with just: OK");
+        request.setModel(model);
+        LLMResponse resp = chat(request);
+        return resp != null && resp.isSuccess();
+    }
+
+    private List<String> listChatModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            // Security: API key via header, NOT URL query param
+            JsonNode response = webClient.get()
+                .uri("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", apiKey)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block();
+            if (response != null && response.hasNonNull("models")) {
+                for (JsonNode m : response.get("models")) {
+                    String id = m.path("name").asText().replace("models/", "");
+                    if (id.startsWith("gemini-") && supportsGenerateContent(m)) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Gemini model discovery failed: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    public List<String> listEmbedModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            // Security: API key via header, NOT URL query param
+            JsonNode response = webClient.get()
+                .uri("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", apiKey)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block();
+            if (response != null && response.hasNonNull("models")) {
+                for (JsonNode m : response.get("models")) {
+                    String id = m.path("name").asText().replace("models/", "");
+                    if (supportsMethod(m, "embedContent")) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Gemini embedding model discovery failed: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    private boolean supportsGenerateContent(JsonNode model) {
+        return supportsMethod(model, "generateContent");
+    }
+
+    private boolean supportsMethod(JsonNode model, String methodName) {
+        JsonNode methods = model.get("supportedGenerationMethods");
+        if (methods != null) {
+            for (JsonNode method : methods) {
+                if (method.asText().contains(methodName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

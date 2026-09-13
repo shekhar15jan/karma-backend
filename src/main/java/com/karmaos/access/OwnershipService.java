@@ -108,4 +108,14 @@ public class OwnershipService {
                 .map(Mission::getId)
                 .collect(Collectors.toList());
     }
+
+    public UUID resolveMissionOwnerId(UUID missionId) {
+        Mission mission = missionRepository.findById(missionId)
+                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Mission not found: " + missionId));
+        Project project = projectRepository.findById(mission.getProjectId())
+                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Project not found: " + mission.getProjectId()));
+        Workspace workspace = workspaceRepository.findById(project.getWorkspaceId())
+                .orElseThrow(() -> ErrorCode.NOT_FOUND.exception("Workspace not found: " + project.getWorkspaceId()));
+        return workspace.getOwnerId();
+    }
 }

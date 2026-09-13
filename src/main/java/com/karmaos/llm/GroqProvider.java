@@ -19,10 +19,14 @@ public class GroqProvider implements LLMProvider {
     private static final String API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     private static final List<String> MODELS = List.of(
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3-32b",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
+        "groq/compound-mini",
         "deepseek-r1-distill-llama-70b"
     );
 
@@ -44,6 +48,30 @@ public class GroqProvider implements LLMProvider {
 
     @Override
     public List<String> getAvailableModels() { return MODELS; }
+
+    @Override
+    public List<String> fetchAvailableModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            JsonNode response = webClient.get()
+                .uri("https://api.groq.com/openai/v1/models")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block();
+            if (response != null && response.hasNonNull("data")) {
+                for (JsonNode m : response.get("data")) {
+                    String id = m.path("id").asText("");
+                    if (!id.isBlank() && !result.contains(id)) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Groq model discovery failed: {}", e.getMessage());
+        }
+        return result.isEmpty() ? getAvailableModels() : result;
+    }
 
     @Override
     public LLMResponse chat(LLMRequest request) {

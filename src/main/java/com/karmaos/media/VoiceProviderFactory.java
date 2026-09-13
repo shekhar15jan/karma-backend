@@ -33,8 +33,6 @@ public class VoiceProviderFactory {
     private VoiceProvider createProvider(String providerType, String apiKey) {
         if (providerType == null) return getFallbackProvider();
         return switch (providerType.toLowerCase()) {
-            case "elevenlabs" -> new ElevenLabsProvider(apiKey, webClientBuilder);
-            case "openai" -> new OpenAIVoiceProvider(apiKey, webClientBuilder);
             case "google", "gemini" -> new GoogleVoiceProvider(apiKey, webClientBuilder);
             case "edge-tts", "edge" -> new EdgeTtsProvider();
             default -> {

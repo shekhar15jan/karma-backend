@@ -41,15 +41,50 @@ public class OpenCodeProvider implements LLMProvider {
 
     @Override
     public List<String> getAvailableModels() {
+        // Live catalog at https://opencode.ai/zen/v1/models (66 ids, 2026-08-27). Free tier = *-free + big-pickle.
+        // Keep hardcoded fallback in sync with live free tier so fallback chain + UI dropdown work without network.
         return List.of(
+            "muse-spark-1.2-contributor-free",
             "deepseek-v4-flash-free",
             "big-pickle",
             "mimo-v2.5-free",
             "laguna-s-2.1-free",
             "ling-3.0-flash-free",
             "north-mini-code-free",
-            "nemotron-3-ultra-free"
+            "nemotron-3-ultra-free",
+            "nemotron-3.5-lightning-free",
+            "hy3-free"
         );
+    }
+
+    @Override
+    public List<String> fetchAvailableModels() {
+        List<String> result = new ArrayList<>();
+        try {
+            String modelsUrl = baseUrl;
+            if (modelsUrl.endsWith("/chat/completions")) {
+                modelsUrl = modelsUrl.substring(0, modelsUrl.length() - "/chat/completions".length());
+            }
+            if (!modelsUrl.endsWith("/models")) {
+                modelsUrl = modelsUrl + "/models";
+            }
+            var requestSpec = webClient.get().uri(modelsUrl);
+            if (apiKey != null && !apiKey.isBlank()) {
+                requestSpec = requestSpec.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
+            }
+            JsonNode response = requestSpec.retrieve().bodyToMono(JsonNode.class).block();
+            if (response != null && response.hasNonNull("data")) {
+                for (JsonNode m : response.get("data")) {
+                    String id = m.path("id").asText("");
+                    if (!id.isBlank() && !result.contains(id)) {
+                        result.add(id);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("OpenCode model discovery failed: {}", e.getMessage());
+        }
+        return result.isEmpty() ? getAvailableModels() : result;
     }
 
     @Override
@@ -69,16 +104,21 @@ public class OpenCodeProvider implements LLMProvider {
                 messages.addAll(request.getMessages());
             }
 
-            Map<String, Object> body = Map.of(
-                "model", model,
-                "messages", messages,
-                "temperature", request.getTemperature(),
-                "max_tokens", request.getMaxTokens()
-            );
+            Map<String, Object> body = new java.util.HashMap<>();
+            body.put("model", model);
+            body.put("messages", messages);
+            body.put("temperature", request.getTemperature());
+            body.put("max_tokens", request.getMaxTokens());
+            if (request.getAdditionalParams() != null) {
+                for (Map.Entry<String, Object> entry : request.getAdditionalParams().entrySet()) {
+                    body.put(entry.getKey(), entry.getValue());
+                }
+            }
 
             var requestSpec = webClient.post()
                 .uri(baseUrl)
-                .contentType(MediaType.APPLICATION_JSON);
+                .contentType(MediaType.APPLICATION_JSON)
+                .header(HttpHeaders.USER_AGENT, "opencode/1.18.16");
 
             if (apiKey != null && !apiKey.isBlank()) {
                 requestSpec = requestSpec.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
