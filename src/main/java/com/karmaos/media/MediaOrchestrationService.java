@@ -693,13 +693,33 @@ public class MediaOrchestrationService {
             captionsConfig.setMaxCharsPerLine(42);
             request.setCaptions(captionsConfig);
             
-            // Generate chapters from scenes
+            // Generate chapters from scenes — prefer chapter_title from visual_spec (YouTube-optimized)
             List<VideoChapter> chapters = new java.util.ArrayList<>();
             double currentTime = 0;
             for (int i = 0; i < scenes.size(); i++) {
                 VideoScene scene = scenes.get(i);
                 VideoChapter chapter = new VideoChapter();
-                chapter.setTitle("Chapter " + (i + 1) + ": " + (scene.getText() != null ? scene.getText().substring(0, Math.min(50, scene.getText().length())) : "Scene " + (i + 1)));
+                // Priority: visual_spec.chapter_title > visual_spec.title > truncated speaker_text
+                String chapterTitle = null;
+                if (scene.getSpec() != null && !scene.getSpec().isBlank()) {
+                    try {
+                        com.fasterxml.jackson.databind.JsonNode specNode = objectMapper.readTree(scene.getSpec());
+                        if (specNode.hasNonNull("chapter_title")) {
+                            chapterTitle = specNode.get("chapter_title").asText().trim();
+                        }
+                        if ((chapterTitle == null || chapterTitle.isBlank()) && specNode.hasNonNull("title")) {
+                            chapterTitle = specNode.get("title").asText().trim();
+                        }
+                    } catch (Exception e) {
+                        // fall through to text-based fallback
+                    }
+                }
+                if (chapterTitle == null || chapterTitle.isBlank()) {
+                    chapterTitle = scene.getText() != null
+                        ? scene.getText().substring(0, Math.min(50, scene.getText().length()))
+                        : "Scene " + (i + 1);
+                }
+                chapter.setTitle(chapterTitle);
                 chapter.setStartTime(currentTime);
                 chapters.add(chapter);
                 // Estimate duration from audio or text

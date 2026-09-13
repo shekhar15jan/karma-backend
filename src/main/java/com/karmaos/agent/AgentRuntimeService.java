@@ -1079,7 +1079,20 @@ public class AgentRuntimeService {
               .append("fear, horror, nudity, adult/sexual content, drugs, alcohol, smoking, or anything inappropriate. ")
               .append("Follow the behavioral contract described in the skill above for style, tone and diagram rules.\n")
               .append("REPEAT: Output ONLY the raw JSON object described by your skill. Do NOT include markdown headings, bullet lists, ")
-              .append("explanatory prose, chain-of-thought reasoning, or any text outside the JSON.");
+              .append("explanatory prose, chain-of-thought reasoning, or any text outside the JSON.\n\n")
+              // YouTube retention hook + chapter metadata
+              .append("YOUTUBE RETENTION DIRECTIVES (CRITICAL for watch-through rate):\n")
+              .append("1. HOOK (Scene 1, ≤5 seconds): Open with a dramatic question, surprising statistic, or bold claim ")
+              .append("that creates curiosity. Use layout 'big-number' or 'title-slide'. Example speaker_text: ")
+              .append("\"Did you know that 90% of production outages are caused by just three patterns? ")
+              .append("Today, we'll break down exactly how to prevent them.\"\n")
+              .append("2. ROADMAP (Scene 2): Briefly tease the agenda — \"In this video, you'll learn...\" — ")
+              .append("so viewers know what value they'll get and stay through the whole video.\n")
+              .append("3. CTA (Final Scene): End with a clear call to action — ask viewers to subscribe, ")
+              .append("like, or comment with a specific question related to the topic.\n")
+              .append("4. CHAPTERS: Each scene MUST include a \"chapter_title\" field (short, 3-6 words, ")
+              .append("suitable for YouTube chapter timestamps). Example: \"Why Race Conditions Kill\", ")
+              .append("\"The Fix: Mutex Locks\", \"Performance Benchmarks\".\n");
         }
 
         return sb.toString();

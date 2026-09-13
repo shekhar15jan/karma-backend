@@ -18,8 +18,17 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // Read allowed origins from env (comma-separated), fall back to localhost for dev
+        String envOrigins = System.getenv("KARMA_WS_ORIGINS");
+        String[] origins;
+        if (envOrigins != null && !envOrigins.isBlank()) {
+            origins = envOrigins.split(",");
+            for (int i = 0; i < origins.length; i++) origins[i] = origins[i].trim();
+        } else {
+            origins = new String[]{"http://localhost*", "http://127.0.0.1*"};
+        }
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("http://localhost*", "http://127.0.0.1*")
+                .setAllowedOriginPatterns(origins)
                 .withSockJS();
     }
 }
