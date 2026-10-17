@@ -15,6 +15,12 @@ import java.util.function.Consumer;
 
 public class GeminiProvider implements LLMProvider {
 
+    /** Extra output budget for Gemini's internal reasoning on top of the requested answer budget. */
+    private static final int THINKING_HEADROOM_TOKENS = 8192;
+    /** Upper bound accepted by current Gemini text models. */
+    private static final int MAX_OUTPUT_TOKENS = 65536;
+
+
     private static final Logger log = LoggerFactory.getLogger(GeminiProvider.class);
     private static final String API_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -72,7 +78,10 @@ public class GeminiProvider implements LLMProvider {
                     && Boolean.TRUE.equals(request.getAdditionalParams().get("googleSearchGrounding"));
 
             Map<String, Object> generationConfig = new LinkedHashMap<>();
-            generationConfig.put("maxOutputTokens", request.getMaxTokens());
+            // Gemini 3.x "thinking" models count their reasoning against maxOutputTokens: with a
+            // 1024-token budget ~980 tokens went to thinking and the answer was cut off mid-JSON.
+            // Treat the requested budget as the answer budget and add headroom for thinking.
+            generationConfig.put("maxOutputTokens", Math.min(MAX_OUTPUT_TOKENS, request.getMaxTokens() + THINKING_HEADROOM_TOKENS));
             if (!grounding) {
                 generationConfig.put("temperature", request.getTemperature());
             }
@@ -103,7 +112,22 @@ public class GeminiProvider implements LLMProvider {
             }
 
             JsonNode candidate = response.get("candidates").get(0);
-            String content = candidate.get("content").get("parts").get(0).get("text").asText();
+            StringBuilder text = new StringBuilder();
+            for (JsonNode part : candidate.path("content").path("parts")) {
+                if (!part.path("thought").asBoolean(false) && part.hasNonNull("text")) {
+                    text.append(part.get("text").asText());
+                }
+            }
+            String content = text.toString();
+            String finishReason = candidate.path("finishReason").asText("");
+            if ("MAX_TOKENS".equals(finishReason)) {
+                // A truncated answer (often half a JSON document) must not pass as success.
+                log.warn("Gemini {} hit MAX_TOKENS ({} chars returned); treating as failure", model, content.length());
+                return LLMResponse.error("Gemini output was truncated (MAX_TOKENS) after " + content.length() + " characters");
+            }
+            if (content.isBlank()) {
+                return LLMResponse.error("Gemini returned no text (finishReason=" + finishReason + ")");
+            }
             JsonNode usageMetadata = response.get("usageMetadata");
             int promptTokens = usageMetadata != null ? usageMetadata.get("promptTokenCount").asInt() : 0;
             int completionTokens = usageMetadata != null ? usageMetadata.get("candidatesTokenCount").asInt() : 0;
