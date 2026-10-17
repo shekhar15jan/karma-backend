@@ -241,8 +241,12 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
     }
 
     /**
-     * After a successful connection test, fetch the live model list for the key and
-     * persist it cheapest-first. Non-fatal: a failed sync never flips the status.
+     * After a successful connection test, fetch the live model list for the key and persist it.
+     * Models the admin configured (and that the key still offers) stay first in their order, since
+     * agents use the first entry; newly discovered models follow cheapest-first. For LLM providers,
+     * models that cannot do text chat (TTS, image, transcription, ...) are left out. Previously the
+     * whole catalogue replaced the list, so a retired model such as gemini-2.5-flash-lite landed
+     * first and every agent call failed right after connecting. Non-fatal: never flips the status.
      */
     private int syncAvailableModels(Provider provider, String type, String apiKey, String apiEndpoint) {
         try {
@@ -250,12 +254,38 @@ private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             if (fetched == null || fetched.isEmpty()) {
                 return 0;
             }
-            List<String> ordered = ModelRanker.orderCheapestFirst(fetched);
+            if (LLM_TYPES.contains(type)) {
+                fetched = fetched.stream().filter(ModelRanker::isTextChatModel).toList();
+            }
+            List<String> ordered = new java.util.ArrayList<>();
+            for (String configured : configuredModels(provider)) {
+                if (fetched.contains(configured) && !ordered.contains(configured)) {
+                    ordered.add(configured);
+                }
+            }
+            for (String model : ModelRanker.orderCheapestFirst(fetched)) {
+                if (!ordered.contains(model)) {
+                    ordered.add(model);
+                }
+            }
+            if (ordered.isEmpty()) {
+                return 0;
+            }
             provider.setModels(objectMapper.writeValueAsString(ordered));
             return ordered.size();
         } catch (Exception e) {
             log.warn("Model sync failed for provider {}: {}", provider.getName(), e.getMessage());
             return 0;
+        }
+    }
+
+    private List<String> configuredModels(Provider provider) {
+        try {
+            if (provider.getModels() == null || provider.getModels().isBlank()) return List.of();
+            return objectMapper.readValue(provider.getModels(),
+                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
         }
     }
 

@@ -16,7 +16,13 @@ public final class ModelRanker {
 
     private static final List<String> CHEAP_TOKENS = List.of(
         "free", "flash", "mini", "lite", "nano", "small", "haiku", "instant",
-        "compact", "versatile", "8b", "7b", "1.5", "2.5"
+        "compact", "versatile", "8b", "7b"
+    );
+
+    /** Name fragments of models that cannot serve text chat (speech, image, transcription, ...). */
+    private static final List<String> NON_CHAT_TOKENS = List.of(
+        "tts", "image", "imagen", "transcribe", "embedding", "embed", "robotics", "computer-use",
+        "nano-banana", "-live", "audio", "whisper", "veo", "lyria"
     );
 
     private static final List<String> EXPENSIVE_TOKENS = List.of(
@@ -24,6 +30,13 @@ public final class ModelRanker {
     );
 
     private ModelRanker() {}
+
+    /** False for models whose names mark them as speech, image or other non-chat models. */
+    public static boolean isTextChatModel(String model) {
+        if (model == null || model.isBlank()) return false;
+        String m = model.toLowerCase(Locale.ROOT);
+        return NON_CHAT_TOKENS.stream().noneMatch(m::contains);
+    }
 
     public static List<String> orderCheapestFirst(List<String> models) {
         if (models == null || models.isEmpty()) {
