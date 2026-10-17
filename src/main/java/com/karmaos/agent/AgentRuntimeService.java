@@ -1113,8 +1113,9 @@ public class AgentRuntimeService {
               .append("explanatory prose, chain-of-thought reasoning, or any text outside the JSON.\n\n")
               // YouTube retention hook + chapter metadata
               .append("YOUTUBE RETENTION DIRECTIVES (CRITICAL for watch-through rate):\n")
-              .append("1. HOOK (Scene 1, ≤5 seconds): Open with a dramatic question, surprising statistic, or bold claim ")
-              .append("that creates curiosity. Use layout 'big-number' or 'title-slide'. Example speaker_text: ")
+              .append("1. HOOK (Scene 1, under 25 words / ~10 seconds, the one exception to the per-scene word count): ")
+              .append("Open with a dramatic question, surprising statistic, or bold claim that creates curiosity. ")
+              .append("Use layout 'big-number', 'comparison' or 'terminal-walkthrough', never 'title-slide'. Example speaker_text: ")
               .append("\"Did you know that 90% of production outages are caused by just three patterns? ")
               .append("Today, we'll break down exactly how to prevent them.\"\n")
               .append("2. ROADMAP (Scene 2): Briefly tease the agenda — \"In this video, you'll learn...\" — ")

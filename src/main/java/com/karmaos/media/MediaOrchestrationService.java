@@ -961,6 +961,7 @@ public class MediaOrchestrationService {
             // Scenes whose script section had no visual_spec otherwise render as a blank slide or a
             // "Scene visual not provided" card.
             sceneVisualGenerator.fillMissingVisuals(scenes, agentId, missionId, missionLabel);
+            sceneVisualGenerator.promoteHookLayout(scenes);
             applyMissionTheme(scenes, missionId, executionId);
             if (scenes.isEmpty()) {
                 step.setStatus("FAILED");

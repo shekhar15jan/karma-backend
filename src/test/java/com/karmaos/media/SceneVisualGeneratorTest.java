@@ -63,4 +63,27 @@ class SceneVisualGeneratorTest {
         assertEquals(0, generator.fillMissingVisuals(List.of(withSpec), null, null, "t"));
         assertEquals("{\"layout\":\"quote\"}", withSpec.getSpec());
     }
+
+    @Test
+    void titleSlideHookWithContentCardsBecomesAComparison() {
+        VideoScene hook = new VideoScene();
+        hook.setSpec("{\"layout\":\"title-slide\",\"title\":\"It works on my machine\",\"components\":["
+                + "{\"type\":\"card\",\"label\":\"Local\"},{\"type\":\"warning-card\",\"label\":\"Staging\"}]}");
+        VideoScene later = new VideoScene();
+        later.setSpec("{\"layout\":\"title-slide\",\"components\":[{\"type\":\"card\"},{\"type\":\"card\"}]}");
+
+        assertTrue(generator.promoteHookLayout(List.of(hook, later)));
+        assertTrue(hook.getSpec().contains("\"layout\":\"comparison\""));
+        assertTrue(later.getSpec().contains("title-slide"), "only the opening scene is the hook");
+    }
+
+    @Test
+    void plainTitleSlideHookIsLeftAlone() {
+        VideoScene hook = new VideoScene();
+        String spec = "{\"layout\":\"title-slide\",\"components\":[{\"type\":\"heading\"},{\"type\":\"badge\"},{\"type\":\"card\"}]}";
+        hook.setSpec(spec);
+
+        assertFalse(generator.promoteHookLayout(List.of(hook)));
+        assertEquals(spec, hook.getSpec());
+    }
 }

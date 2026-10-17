@@ -125,6 +125,40 @@ public class SceneVisualGenerator {
         return missing.size();
     }
 
+    /** Component types that are just more text on a title slide, not on-screen content. */
+    private static final Set<String> TITLE_TEXT_TYPES = Set.of("heading", "title", "paragraph", "text", "badge");
+
+    /**
+     * The opening scene decides whether viewers stay, and a title slide that stacks its cards
+     * under the topic name for its whole duration reads as a static intro. The script prompt
+     * forbids it, but models still pick it; when the scene carries two or more content cards,
+     * lay them out side by side as a comparison instead.
+     *
+     * @return true when the first scene's layout was changed
+     */
+    @SuppressWarnings("unchecked")
+    public boolean promoteHookLayout(List<VideoScene> scenes) {
+        if (scenes.isEmpty() || scenes.get(0).getSpec() == null || scenes.get(0).getSpec().isBlank()) return false;
+        try {
+            Map<String, Object> spec = objectMapper.readValue(scenes.get(0).getSpec(), Map.class);
+            String layout = String.valueOf(spec.get("layout"));
+            if (!"title-slide".equals(layout) && !"section-header".equals(layout)) return false;
+            Object components = spec.get("components");
+            if (!(components instanceof List<?> list)) return false;
+            long content = list.stream()
+                    .filter(c -> c instanceof Map<?, ?> m && !TITLE_TEXT_TYPES.contains(String.valueOf(m.get("type"))))
+                    .count();
+            if (content < 2) return false;
+            spec.put("layout", "comparison");
+            scenes.get(0).setSpec(objectMapper.writeValueAsString(spec));
+            log.info("Opening scene used a {} layout with {} content cards; rendering it as a comparison", layout, content);
+            return true;
+        } catch (Exception e) {
+            log.warn("Could not inspect the opening scene's layout: {}", e.getMessage());
+            return false;
+        }
+    }
+
     private Map<Integer, Map<String, Object>> draftWithLlm(List<VideoScene> scenes, List<Integer> missing,
                                                            UUID agentId, UUID missionId, String topic) {
         StringBuilder user = new StringBuilder();
