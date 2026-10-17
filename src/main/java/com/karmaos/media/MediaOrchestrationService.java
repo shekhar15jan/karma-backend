@@ -478,7 +478,7 @@ public class MediaOrchestrationService {
                     voiceProvider = new EdgeTtsProvider();
                     sceneRequest.setModel(voiceProvider.getDefaultModel());
                     sceneRequest.setVoice(voiceProvider.getDefaultModel());
-                    sceneResponse = voiceProvider.synthesize(sceneRequest);
+                    sceneResponse = synthesizeWithRetry(voiceProvider, sceneRequest);
                 }
                 if (sceneResponse.isSuccess()) {
                     sceneAudioUrls.add(sceneResponse.getAudioUrl());
@@ -546,6 +546,8 @@ public class MediaOrchestrationService {
 
     private VoiceResponse synthesizeWithRetry(VoiceProvider voiceProvider, VoiceRequest request) {
         VoiceResponse response = voiceProvider.synthesize(request);
+        // Other providers fail on configuration (e.g. a 401 key) and are swapped for Edge by the caller.
+        if (!(voiceProvider instanceof EdgeTtsProvider)) return response;
         for (long delay : TTS_RETRY_DELAYS_MS) {
             if (response.isSuccess()) break;
             log.warn("{} narration failed ({}); retrying in {} ms", voiceProvider.getName(), response.getErrorMessage(), delay);
