@@ -233,7 +233,8 @@ public class AgentRuntimeService {
                                              ExecutionStep step) throws Exception {
         StoryTarget target = configuredStoryTarget(agent, missionId);
         int scenesPerChunk = configScenesPerChunk(agent);
-        double avgSceneSeconds = Math.max(5.0, Math.min(10.0, target.wordsPerScene() / 2.3));
+        // A scene lasts as long as its narration (~2.3 words/s); the old 10s cap tripled the scene count.
+        double avgSceneSeconds = Math.max(5.0, (target.wordsPerScene() + SCENE_WORD_SLACK) / WORDS_PER_SECOND);
         int totalScenes = Math.max(1, (int) Math.round(target.targetDurationSeconds() / avgSceneSeconds));
         // Cap to configured maxScenes to keep payload/render manageable (was generating 69 for 600s/8.7)
         totalScenes = Math.min(totalScenes, target.maxScenes());
@@ -1091,9 +1092,9 @@ public class AgentRuntimeService {
               .append(" to ").append(target.maxScenes).append(" scenes. ")
               .append("Each speaker_text must be a complete spoken paragraph of about ")
               .append(target.wordsPerScene)
-              .append("-").append(target.wordsPerScene + 25)
+              .append("-").append(target.wordsPerScene + 2 * SCENE_WORD_SLACK)
               .append(" words (spoken at ~2.3 words per second, so each scene is roughly ")
-              .append(Math.round(target.wordsPerScene / 2.3)).append("-").append(Math.round((target.wordsPerScene + 25) / 2.3))
+              .append(Math.round(target.wordsPerScene / 2.3)).append("-").append(Math.round((target.wordsPerScene + 2 * SCENE_WORD_SLACK) / 2.3))
               .append(" seconds). ")
               .append("Make the script complete and non-branded. ")
               .append("STRICT CONTENT SAFETY RULES: The content must be family-friendly, age-appropriate and suitable for all audiences. ")
@@ -1376,6 +1377,12 @@ public class AgentRuntimeService {
                 Mission mission = missionRepository.findById(missionId).orElse(null);
                 if (mission != null && mission.getTargetDurationSeconds() != null && mission.getTargetDurationSeconds() > 0) {
                     targetDuration = Math.max(30, mission.getTargetDurationSeconds());
+                    // The scene limits default to a 15-minute video (30-36 scenes). Size them from the
+                    // mission's own duration, otherwise a "4 minute" video came out at ~8 minutes.
+                    int scenes = Math.max(3, (int) Math.round(targetDuration * WORDS_PER_SECOND
+                            / (wordsPerScene + SCENE_WORD_SLACK)));
+                    minScenes = Math.min(minScenes, scenes);
+                    maxScenes = Math.max(minScenes, Math.min(maxScenes, scenes + 1));
                 }
             } catch (Exception ignored) {
             }
@@ -1383,6 +1390,11 @@ public class AgentRuntimeService {
 
         return new StoryTarget(targetDuration, minScenes, maxScenes, wordsPerScene);
     }
+
+    /** Narration pace used to size scenes (Edge/neural TTS speak ~2.3 words per second). */
+    private static final double WORDS_PER_SECOND = 2.3;
+    /** Allowed overshoot per scene above wordsPerScene, kept small so the total length holds. */
+    private static final int SCENE_WORD_SLACK = 8;
 
     private record StoryTarget(int targetDurationSeconds, int minScenes, int maxScenes, int wordsPerScene) {
         StoryTarget {
