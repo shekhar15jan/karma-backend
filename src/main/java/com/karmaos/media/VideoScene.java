@@ -29,4 +29,7 @@ public class VideoScene {
 
     /** Per-scene transition override (e.g., fade, slide-left, wipe-left, zoom) */
     private String transition;
+
+    /** JSON [{"text","start","end"}]: when each narration word is spoken, in seconds into the scene audio. */
+    private String words;
 }

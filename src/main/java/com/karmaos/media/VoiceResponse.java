@@ -7,6 +7,8 @@ public class VoiceResponse {
     private String errorMessage;
     private String model;
     private int durationSeconds;
+    /** Per-word timings [{"text","start","end"}] in seconds, when the provider reports them. */
+    private String wordTimingsJson;
 
     public static VoiceResponse ok(String audioUrl, String model, long latencyMs, int durationSeconds) {
         VoiceResponse r = new VoiceResponse();
@@ -37,4 +39,6 @@ public class VoiceResponse {
     public void setModel(String model) { this.model = model; }
     public int getDurationSeconds() { return durationSeconds; }
     public void setDurationSeconds(int durationSeconds) { this.durationSeconds = durationSeconds; }
+    public String getWordTimingsJson() { return wordTimingsJson; }
+    public void setWordTimingsJson(String wordTimingsJson) { this.wordTimingsJson = wordTimingsJson; }
 }

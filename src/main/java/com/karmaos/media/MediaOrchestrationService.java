@@ -483,7 +483,8 @@ public class MediaOrchestrationService {
                 if (sceneResponse.isSuccess()) {
                     sceneAudioUrls.add(sceneResponse.getAudioUrl());
                     persistSceneAudioArtifact(missionId, "Scene Narration " + (i + 1), sceneResponse.getAudioUrl(),
-                            sceneResponse.getDurationSeconds(), i, artifactReviewStatus(executionId));
+                            sceneResponse.getDurationSeconds(), i, sceneResponse.getWordTimingsJson(),
+                            artifactReviewStatus(executionId));
                     synthesized++;
                 } else {
                     log.warn("Per-scene narration {} failed: {}", i, sceneResponse.getErrorMessage());
@@ -562,7 +563,8 @@ public class MediaOrchestrationService {
         return response;
     }
 
-    private void persistSceneAudioArtifact(UUID missionId, String name, String audioUrl, long sizeSeconds, int sceneIndex, String reviewStatus) {
+    private void persistSceneAudioArtifact(UUID missionId, String name, String audioUrl, long sizeSeconds, int sceneIndex,
+                                           String wordTimingsJson, String reviewStatus) {
         Artifact artifact = new Artifact();
         artifact.setMissionId(missionId);
         artifact.setName(name);
@@ -574,7 +576,11 @@ public class MediaOrchestrationService {
         artifact.setPublicationStatus("UNPUBLISHED");
         artifact.setStorageLocation(audioUrl);
         artifact.setSize(sizeSeconds);
-        artifact.setMetadata("{\"sceneIndex\":" + sceneIndex + "}");
+        com.fasterxml.jackson.databind.node.ObjectNode metadata = objectMapper.createObjectNode().put("sceneIndex", sceneIndex);
+        if (wordTimingsJson != null) {
+            try { metadata.set("words", objectMapper.readTree(wordTimingsJson)); } catch (Exception ignored) {}
+        }
+        artifact.setMetadata(metadata.toString());
         artifactStorageService.persist(artifact, missionId);
         artifactRepository.save(artifact);
     }
@@ -929,6 +935,7 @@ public class MediaOrchestrationService {
             // narration, background music and scene images (legacy ffmpeg path disabled).
             List<Artifact> artifacts = artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId);
             java.util.Map<Integer, String> sceneAudio = new java.util.TreeMap<>();
+            java.util.Map<Integer, String> sceneWords = new java.util.TreeMap<>();
             java.util.Map<Integer, String> sceneImages = new java.util.TreeMap<>();
             String audioUrl = null;
             String musicUrl = null;
@@ -943,7 +950,10 @@ public class MediaOrchestrationService {
                     }
                     Integer sceneIndex = extractSceneIndex(a.getMetadata());
                     if (sceneIndex != null) {
-                        sceneAudio.putIfAbsent(sceneIndex, location);
+                        if (sceneAudio.putIfAbsent(sceneIndex, location) == null) {
+                            String words = extractSceneWords(a.getMetadata());
+                            if (words != null) sceneWords.put(sceneIndex, words);
+                        }
                     } else if (audioUrl == null) {
                         audioUrl = location;
                     }
@@ -964,7 +974,7 @@ public class MediaOrchestrationService {
             // through the V2 SemanticScene renderer even while the admin setting says V1.
             String renderingMode = runtimeSettings.getString(com.karmaos.visual.VisualDirectorService.KEY_VIDEO_RENDERING_MODE, "V1");
             // Remotion is the only supported video provider
-            List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages, renderingMode);
+            List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, sceneWords, audioUrl, sceneImages, renderingMode);
             if ("V2".equalsIgnoreCase(renderingMode)) {
                 visualDirectorService.enrichVideoScenes(scenes);
                 log.info("V2 rendering mode enabled — enriched {} scenes with semantic intent", scenes.size());
@@ -1231,6 +1241,7 @@ public class MediaOrchestrationService {
      */
     private List<VideoScene> buildRemotionScenes(String script,
                                                  java.util.Map<Integer, String> sceneAudio,
+                                                 java.util.Map<Integer, String> sceneWords,
                                                  String combinedAudio,
                                                  java.util.Map<Integer, String> sceneImages,
                                                  String renderingMode) {
@@ -1369,6 +1380,7 @@ public class MediaOrchestrationService {
             // own clip failed made that scene replay the entire narration (a 4-minute video came
             // out at 11:41). Only fall back to it when no scene has its own clip (legacy single track).
             scene.setAudioUrl(perScene != null ? perScene : (sceneAudio.isEmpty() ? combinedAudio : null));
+            if (perScene != null) scene.setWords(sceneWords.get(i));
             scenes.add(scene);
         }
         return scenes;
@@ -1526,6 +1538,17 @@ public class MediaOrchestrationService {
             return input;
         }
         return null;
+    }
+
+    /** The per-word narration timings stored with a scene's audio, as a JSON array string. */
+    private String extractSceneWords(String metadata) {
+        if (metadata == null || metadata.isBlank()) return null;
+        try {
+            com.fasterxml.jackson.databind.JsonNode words = objectMapper.readTree(metadata).get("words");
+            return words != null && words.isArray() && !words.isEmpty() ? words.toString() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Integer extractSceneIndex(String metadata) {

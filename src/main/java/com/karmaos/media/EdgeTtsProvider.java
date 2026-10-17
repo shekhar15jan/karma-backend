@@ -7,6 +7,7 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -35,6 +36,34 @@ public class EdgeTtsProvider implements VoiceProvider {
     private static final String EDGE_TTS_CMD = "python";
     private static final String EDGE_TTS_MODULE = "-m";
     private static final String EDGE_TTS_MODULE_NAME = "edge_tts";
+
+    /**
+     * Synthesises with the edge_tts library rather than its CLI: only the library reports a
+     * timestamp per spoken word (the CLI writes sentence subtitles), and the renderer needs
+     * those to show each element and caption when the narration reaches it.
+     * argv: text file, voice, rate, mp3 out, words JSON out, proxy (may be empty).
+     * Words are written as [{"text", "start", "end"}] in seconds from the start of the clip.
+     */
+    private static final String SYNTHESIZE_SCRIPT = """
+        import asyncio, json, sys
+        import edge_tts
+        text_file, voice, rate, media_out, words_out, proxy = sys.argv[1:7]
+        async def main():
+            text = open(text_file, encoding="utf-8").read()
+            comm = edge_tts.Communicate(text, voice, rate=rate, boundary="WordBoundary", proxy=proxy or None)
+            words = []
+            with open(media_out, "wb") as media:
+                async for chunk in comm.stream():
+                    if chunk["type"] == "audio":
+                        media.write(chunk["data"])
+                    elif chunk["type"] == "WordBoundary":
+                        start = chunk["offset"] / 1e7
+                        words.append({"text": chunk["text"], "start": round(start, 3),
+                                      "end": round(start + chunk["duration"] / 1e7, 3)})
+            with open(words_out, "w", encoding="utf-8") as f:
+                json.dump(words, f)
+        asyncio.run(main())
+        """;
     private static final int TIMEOUT_SECONDS = 60;
 
     @Override
@@ -57,6 +86,7 @@ public class EdgeTtsProvider implements VoiceProvider {
         long start = System.currentTimeMillis();
         Path tempFile = null;
         Path textFile = null;
+        Path wordsFile = null;
         try {
             String text = request.getText();
             if (text == null || text.isBlank()) {
@@ -73,32 +103,17 @@ public class EdgeTtsProvider implements VoiceProvider {
             textFile = Files.createTempFile("edge_tts_text_", ".txt");
             Files.writeString(textFile, text, java.nio.charset.StandardCharsets.UTF_8);
 
+            wordsFile = Files.createTempFile("edge_tts_words_", ".json");
             boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
-            ProcessBuilder pb;
-            if (isWindows) {
-                pb = new ProcessBuilder(
-                    "cmd.exe", "/c", "python", "-m", "edge_tts",
-                    "--voice", voice,
-                    "--file", textFile.toAbsolutePath().toString(),
-                    "--rate", rate,
-                    "--write-media", tempFile.toAbsolutePath().toString()
-                );
-            } else {
-                pb = new ProcessBuilder(
-                    "python3", "-m", "edge_tts",
-                    "--voice", voice,
-                    "--file", textFile.toAbsolutePath().toString(),
-                    "--rate", rate,
-                    "--write-media", tempFile.toAbsolutePath().toString()
-                );
-            }
-
-            log.info("Executing Edge TTS command: {}", String.join(" ", pb.command()));
             // edge-tts (aiohttp) ignores proxy env vars; pass the standard one explicitly.
             String proxy = System.getenv("HTTPS_PROXY") != null ? System.getenv("HTTPS_PROXY") : System.getenv("https_proxy");
-            if (proxy != null && !proxy.isBlank()) {
-                pb.command().addAll(List.of("--proxy", proxy));
-            }
+            List<String> command = new ArrayList<>(isWindows ? List.of("cmd.exe", "/c", "python") : List.of("python3"));
+            command.addAll(List.of("-c", SYNTHESIZE_SCRIPT,
+                textFile.toAbsolutePath().toString(), voice, rate,
+                tempFile.toAbsolutePath().toString(), wordsFile.toAbsolutePath().toString(),
+                proxy != null ? proxy : ""));
+            ProcessBuilder pb = new ProcessBuilder(command);
+            log.info("Executing Edge TTS: voice={}, rate={}, {} chars", voice, rate, text.length());
 
             pb.redirectErrorStream(true);
             Process process = pb.start();
@@ -127,7 +142,10 @@ public class EdgeTtsProvider implements VoiceProvider {
             String dataUri = "data:audio/mpeg;base64," + Base64.getEncoder().encodeToString(audioBytes);
             int durationSec = estimateDuration(text, speed);
 
-            return VoiceResponse.ok(dataUri, voice, latency, durationSec);
+            VoiceResponse response = VoiceResponse.ok(dataUri, voice, latency, durationSec);
+            String words = Files.exists(wordsFile) ? Files.readString(wordsFile) : "";
+            if (!words.isBlank() && !"[]".equals(words.trim())) response.setWordTimingsJson(words);
+            return response;
 
         } catch (Exception e) {
             log.error("Edge TTS synthesis failed", e);
@@ -135,6 +153,9 @@ public class EdgeTtsProvider implements VoiceProvider {
         } finally {
             if (tempFile != null) {
                 try { Files.deleteIfExists(tempFile); } catch (IOException ignored) {}
+            }
+            if (wordsFile != null) {
+                try { Files.deleteIfExists(wordsFile); } catch (IOException ignored) {}
             }
             if (textFile != null) {
                 try { Files.deleteIfExists(textFile); } catch (IOException ignored) {}

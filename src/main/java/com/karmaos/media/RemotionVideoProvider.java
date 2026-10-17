@@ -245,6 +245,11 @@ public class RemotionVideoProvider implements VideoProvider {
             if (scene.getText() != null && !scene.getText().isBlank() && !scene.getText().trim().startsWith("{")) {
                 sceneNode.put("narration", scene.getText());
             }
+            // Word timings from the voice provider: the renderer shows each element and caption
+            // when the narration reaches it instead of on a fixed schedule.
+            if (scene.getWords() != null && !scene.getWords().isBlank() && sceneNode.has("audio")) {
+                try { sceneNode.set("words", objectMapper.readTree(scene.getWords())); } catch (Exception e) {}
+            }
             scenes.add(sceneNode);
         }
         body.set("scenes", scenes);
