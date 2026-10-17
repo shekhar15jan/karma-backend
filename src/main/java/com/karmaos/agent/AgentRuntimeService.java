@@ -852,7 +852,9 @@ public class AgentRuntimeService {
                 if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null
                         && isOverloadError(lastResponse.getErrorMessage())) {
                     overloadedModels.add(provider.getId() + ":" + modelUsed);
-                    if (alternativeModel(provider, overloadedModels) == null && attempt < maxAttempts) {
+                    boolean rateLimited = lastResponse.getErrorMessage().contains("429");
+                    // 429s get their own backoff below; only wait here for 503-style overload.
+                    if (!rateLimited && alternativeModel(provider, overloadedModels) == null && attempt < maxAttempts) {
                         long sleepTime = 15_000L * attempt;
                         log.warn("Provider {} overloaded with no alternative model; waiting {} ms before retry", provider.getName(), sleepTime);
                         try {
@@ -865,7 +867,8 @@ public class AgentRuntimeService {
 
                 if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null) {
                     String err = lastResponse.getErrorMessage().toLowerCase();
-                    if (err.contains("429") || err.contains("rate limit") || err.contains("too many requests")) {
+                    if ((err.contains("429") || err.contains("rate limit") || err.contains("too many requests"))
+                            && alternativeModel(provider, overloadedModels) == null) {
                         long sleepTime = (long) (30 * 1000 * attempt) + (long) (Math.random() * 5000);
                         log.warn("Rate limit hit, applying exponential backoff. Sleeping for {} ms before retry", sleepTime);
                         try {
@@ -1542,7 +1545,10 @@ public class AgentRuntimeService {
     private static boolean isOverloadError(String message) {
         String m = message.toLowerCase();
         return m.contains("503") || m.contains("service unavailable") || m.contains("overloaded")
-                || m.contains("high demand") || m.contains("unavailable");
+                || m.contains("high demand") || m.contains("unavailable")
+                // Quota/rate limits are per model (e.g. Gemini free tier: 20 requests/day/model),
+                // so another model on the same key usually still works.
+                || m.contains("429") || m.contains("too many requests") || m.contains("quota");
     }
 
     /** Next configured text model on the provider that has not been reported overloaded, or null. */
