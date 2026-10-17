@@ -1398,8 +1398,11 @@ public class AgentRuntimeService {
         return new StoryTarget(targetDuration, minScenes, maxScenes, wordsPerScene);
     }
 
-    /** Narration pace used to size scenes, measured on Edge TTS output (1,202 words -> 448s). */
-    private static final double WORDS_PER_SECOND = 2.6;
+    /**
+     * Effective narration pace used to size scenes, including natural pauses between sentences.
+     * Measured on rendered Edge TTS videos: 556 words -> 289s and 619 words -> 324s (~1.9 w/s).
+     */
+    private static final double WORDS_PER_SECOND = 2.0;
     /**
      * Words per scene. Models write ~40-45 words per scene whatever they are asked (a 70-word
      * target produced 45), and 15-20s per visual keeps retention up, so plan around that.
