@@ -233,8 +233,8 @@ public class AgentRuntimeService {
                                              ExecutionStep step) throws Exception {
         StoryTarget target = configuredStoryTarget(agent, missionId);
         int scenesPerChunk = configScenesPerChunk(agent);
-        // A scene lasts as long as its narration (~2.3 words/s); the old 10s cap tripled the scene count.
-        double avgSceneSeconds = Math.max(5.0, (target.wordsPerScene() + SCENE_WORD_SLACK) / WORDS_PER_SECOND);
+        // A scene lasts as long as its narration; the old 10s cap tripled the scene count.
+        double avgSceneSeconds = Math.max(5.0, target.wordsPerScene() / WORDS_PER_SECOND);
         int totalScenes = Math.max(1, (int) Math.round(target.targetDurationSeconds() / avgSceneSeconds));
         // Cap to configured maxScenes to keep payload/render manageable (was generating 69 for 600s/8.7)
         totalScenes = Math.min(totalScenes, target.maxScenes());
@@ -1093,8 +1093,8 @@ public class AgentRuntimeService {
               .append("Each speaker_text must be a complete spoken paragraph of about ")
               .append(target.wordsPerScene)
               .append("-").append(target.wordsPerScene + 2 * SCENE_WORD_SLACK)
-              .append(" words (spoken at ~2.3 words per second, so each scene is roughly ")
-              .append(Math.round(target.wordsPerScene / 2.3)).append("-").append(Math.round((target.wordsPerScene + 2 * SCENE_WORD_SLACK) / 2.3))
+              .append(" words (spoken at ~").append(WORDS_PER_SECOND).append(" words per second, so each scene is roughly ")
+              .append(Math.round(target.wordsPerScene / WORDS_PER_SECOND)).append("-").append(Math.round((target.wordsPerScene + 2 * SCENE_WORD_SLACK) / WORDS_PER_SECOND))
               .append(" seconds). ")
               .append("Make the script complete and non-branded. ")
               .append("STRICT CONTENT SAFETY RULES: The content must be family-friendly, age-appropriate and suitable for all audiences. ")
@@ -1350,8 +1350,8 @@ public class AgentRuntimeService {
     private StoryTarget configuredStoryTarget(Agent agent, UUID missionId) {
         int targetDuration = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_TARGET_DURATION, 900);
         int minScenes = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_MIN_SCENES, 30);
-        int maxScenes = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_MAX_SCENES, 36);
-        int wordsPerScene = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 70);
+        int maxScenes = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_MAX_SCENES, 60);
+        int wordsPerScene = runtimeSettings.getInt(RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, DEFAULT_WORDS_PER_SCENE);
 
         if (agent != null && agent.getConfiguration() != null && !agent.getConfiguration().isBlank()) {
             try {
@@ -1379,8 +1379,7 @@ public class AgentRuntimeService {
                     targetDuration = Math.max(30, mission.getTargetDurationSeconds());
                     // The scene limits default to a 15-minute video (30-36 scenes). Size them from the
                     // mission's own duration, otherwise a "4 minute" video came out at ~8 minutes.
-                    int scenes = Math.max(3, (int) Math.round(targetDuration * WORDS_PER_SECOND
-                            / (wordsPerScene + SCENE_WORD_SLACK)));
+                    int scenes = Math.max(3, (int) Math.round(targetDuration * WORDS_PER_SECOND / wordsPerScene));
                     minScenes = Math.min(minScenes, scenes);
                     maxScenes = Math.max(minScenes, Math.min(maxScenes, scenes + 1));
                 }
@@ -1391,8 +1390,13 @@ public class AgentRuntimeService {
         return new StoryTarget(targetDuration, minScenes, maxScenes, wordsPerScene);
     }
 
-    /** Narration pace used to size scenes (Edge/neural TTS speak ~2.3 words per second). */
-    private static final double WORDS_PER_SECOND = 2.3;
+    /** Narration pace used to size scenes, measured on Edge TTS output (1,202 words -> 448s). */
+    private static final double WORDS_PER_SECOND = 2.6;
+    /**
+     * Words per scene. Models write ~40-45 words per scene whatever they are asked (a 70-word
+     * target produced 45), and 15-20s per visual keeps retention up, so plan around that.
+     */
+    private static final int DEFAULT_WORDS_PER_SCENE = 45;
     /** Allowed overshoot per scene above wordsPerScene, kept small so the total length holds. */
     private static final int SCENE_WORD_SLACK = 8;
 
@@ -1401,7 +1405,7 @@ public class AgentRuntimeService {
             if (targetDurationSeconds <= 0) targetDurationSeconds = 900;
             if (minScenes <= 0) minScenes = 30;
             if (maxScenes < minScenes) maxScenes = minScenes;
-            if (wordsPerScene <= 0) wordsPerScene = 70;
+            if (wordsPerScene <= 0) wordsPerScene = DEFAULT_WORDS_PER_SCENE;
         }
     }
 

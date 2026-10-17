@@ -33,8 +33,8 @@ public class SettingsService {
         RuntimeSettings.KEY_MUSIC_MAX_DURATION, 30,
         RuntimeSettings.KEY_VIDEO_TARGET_DURATION, 900,
         RuntimeSettings.KEY_VIDEO_MIN_SCENES, 30,
-        RuntimeSettings.KEY_VIDEO_MAX_SCENES, 36,
-        RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 70,
+        RuntimeSettings.KEY_VIDEO_MAX_SCENES, 60,
+        RuntimeSettings.KEY_VIDEO_WORDS_PER_SCENE, 45,
         RuntimeSettings.KEY_VIDEO_CHUNK_DELAY_MS, 4000
     );
 
