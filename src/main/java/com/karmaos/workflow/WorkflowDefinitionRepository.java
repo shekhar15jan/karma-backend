@@ -12,4 +12,6 @@ public interface WorkflowDefinitionRepository extends JpaRepository<WorkflowDefi
     List<WorkflowDefinition> findByProjectIdOrderByCreatedAtDesc(UUID projectId);
 
     List<WorkflowDefinition> findAllByOrderByCreatedAtDesc();
+
+    List<WorkflowDefinition> findByProjectIdInOrderByCreatedAtDesc(List<UUID> projectIds);
 }

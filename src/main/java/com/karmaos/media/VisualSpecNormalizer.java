@@ -17,8 +17,11 @@ import java.util.Set;
  */
 public final class VisualSpecNormalizer {
 
-    /** Layouts the karma-renderer video path actually implements (V2 16 + legacy). */
-    private static final Set<String> LAYOUTS = Set.of(
+    /**
+     * Layouts the karma-renderer video path actually implements (V2 16 + legacy).
+     * Single source of truth — {@code AgentRuntimeService.ALLOWED_LAYOUTS} mirrors this set.
+     */
+    public static final Set<String> LAYOUTS = Set.of(
         "title-slide", "section-header", "standard-content", "two-column", "split-image",
         "architecture-diagram", "feature-grid", "big-number", "comparison", "quote",
         "code-explainer", "terminal-walkthrough", "roadmap-timeline",
@@ -45,8 +48,13 @@ public final class VisualSpecNormalizer {
         Map.entry("poster", "title-slide")
     );
 
-    /** Component vocabulary the video renderer supports (expanded V2). */
-    private static final Set<String> COMPONENT_TYPES = Set.of(
+    /**
+     * Component vocabulary the video renderer supports (expanded V2).
+     * Single source of truth — {@code AgentRuntimeService.isSpecCompliant} validates
+     * against this same set so LLM output validation and normalization never disagree
+     * about which component types survive to the renderer.
+     */
+    public static final Set<String> COMPONENT_TYPES = Set.of(
         "heading", "paragraph", "text", "bullet-list", "code", "command",
         "card", "info-card", "warning-card", "stat-card", "quote-card", "comparison",
         "bar-chart", "donut-chart", "progress-bar", "profile-card", "gauge", "radar", "pie-chart", "line-chart",

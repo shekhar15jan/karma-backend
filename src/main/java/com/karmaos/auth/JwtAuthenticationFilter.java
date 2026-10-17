@@ -60,9 +60,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (StringUtils.hasText(bearerToken) && bearerToken.startsWith("Bearer ")) {
             return bearerToken.substring(7);
         }
-        // EventSource/SSE cannot set an Authorization header; fall back to a ?token= query param.
+        // EventSource/SSE and <video>/<img> src cannot set an Authorization header, so they
+        // fall back to a ?token= query param. Only short-lived stream-scoped tokens are
+        // accepted there — never the long-lived session access token — so a URL leaked via
+        // server access logs, browser history, or a proxy exposes only a narrow window.
         String queryToken = request.getParameter("token");
-        if (StringUtils.hasText(queryToken)) {
+        if (StringUtils.hasText(queryToken) && tokenProvider.isStreamToken(queryToken)) {
             return queryToken;
         }
         return null;

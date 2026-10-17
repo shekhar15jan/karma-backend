@@ -512,6 +512,8 @@ public class ExecutionOrchestrator {
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             case "VIDEO" -> mediaOrchestrationService.executeVideoStep(
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
+            case "DIRECTOR" -> mediaOrchestrationService.executeDirectorStep(
+                executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
             default -> agentRuntimeService.executeAgentStep(
                 executionId, sp.flowId, sp.agentId, stepOrder, previousOutput, missionId, reviewerFeedback);
         };
@@ -615,6 +617,7 @@ public class ExecutionOrchestrator {
                 case "IMAGE":
                 case "VOICE":
                 case "MUSIC":
+                case "DIRECTOR":
                     return kind;
                 default:
                     // "AGENT" or unknown kinds fall through to inference
@@ -643,6 +646,9 @@ public class ExecutionOrchestrator {
             if (agentName.contains("music")) {
                 return "MUSIC";
             }
+            if (agentName.contains("director")) {
+                return "DIRECTOR";
+            }
             if (agentName.contains("video")) {
                 return "VIDEO";
             }
@@ -663,6 +669,7 @@ public class ExecutionOrchestrator {
                 case "IMAGE_GENERATION" -> "IMAGE";
                 case "TTS" -> "VOICE";
                 case "MUSIC_GENERATION" -> "MUSIC";
+                case "SCENE_DIRECTION" -> "DIRECTOR";
                 case "VIDEO_GENERATION" -> "VIDEO";
                 default -> "LLM";
             }, step.getNodeId(), Collections.emptyList());

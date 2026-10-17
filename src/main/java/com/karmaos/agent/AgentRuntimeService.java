@@ -30,7 +30,7 @@ import com.karmaos.sourcedocument.SourceDocument;
 import com.karmaos.sourcedocument.SourceDocumentRepository;
 import com.karmaos.workspace.Workspace;
 import com.karmaos.workspace.WorkspaceRepository;
-import com.karmaos.settings.RuntimeSettings;
+import com.karmaos.media.VisualSpecNormalizer;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,23 +64,13 @@ public class AgentRuntimeService {
     );
 
     /** Layouts the karma-renderer video path actually implements (skill contract). */
-    private static final Set<String> ALLOWED_LAYOUTS = Set.of(
-        "title-slide", "section-header", "standard-content", "two-column", "split-image",
-        "architecture-diagram", "feature-grid", "big-number", "comparison", "quote",
-        "code-explainer", "terminal-walkthrough", "roadmap-timeline",
-        "bento", "dashboard", "infographic"
-    );
+    /** Single source of truth: mirrors {@link VisualSpecNormalizer#LAYOUTS} so LLM output
+     * validation and downstream normalization never disagree on which layouts render. */
+    private static final Set<String> ALLOWED_LAYOUTS = VisualSpecNormalizer.LAYOUTS;
 
-    /** Component vocabulary the video renderer supports. Anything else is coerced to card (not rejected) to avoid 103→40 validation failures. */
-    private static final Set<String> ALLOWED_COMPONENT_TYPES = Set.of(
-        "heading", "paragraph", "text", "bullet-list", "code", "command",
-        "card", "info-card", "warning-card", "stat-card", "quote-card",
-        "bar-chart", "donut-chart", "progress-bar", "profile-card",
-        "microservice-node", "api-gateway", "message-queue", "docker-node", "kubernetes-node",
-        "logging-node", "browser-node", "aws-node", "azure-node", "gcp-node", "language-node",
-        "arrow", "connector", "arrow-connector",
-        "big-number", "number", "stat", "feature", "comparison", "quote", "timeline", "roadmap", "terminal", "code-explainer"
-    );
+    /** Single source of truth: mirrors {@link VisualSpecNormalizer#COMPONENT_TYPES}. Anything
+     * outside this set is coerced to card (not rejected) to avoid 103→40 validation failures. */
+    private static final Set<String> ALLOWED_COMPONENT_TYPES = VisualSpecNormalizer.COMPONENT_TYPES;
 
     private final LLMProviderFactory providerFactory;
     private final ProviderRepository providerRepository;
@@ -759,7 +749,12 @@ public class AgentRuntimeService {
                 maxTokens, content -> isOutputValidFor(agent, content), false);
     }
 
-    private LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
+    /**
+     * Public entry point so other services (e.g. MediaOrchestrationService's Director
+     * step) can reuse the retry+fallback+corrective-hint machinery with their own
+     * validator, without duplicating provider-chain/retry logic.
+     */
+    public LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
                                                     String systemPrompt, String userMessage, UUID missionId, int maxTokens,
                                                     Predicate<String> validator, boolean chunkMode) {
         final int maxAttempts = 3;
@@ -988,7 +983,8 @@ public class AgentRuntimeService {
         }
     }
 
-    private String buildSystemPrompt(Agent agent, Flow flow, UUID missionId) {
+    /** Public so other services (e.g. the Director step) can reuse skill-content injection. */
+    public String buildSystemPrompt(Agent agent, Flow flow, UUID missionId) {
         StringBuilder sb = new StringBuilder();
 
         Mission mission = missionId != null ? missionRepository.findById(missionId).orElse(null) : null;

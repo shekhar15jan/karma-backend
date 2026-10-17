@@ -69,7 +69,7 @@ public class RemotionVideoProvider implements VideoProvider {
     @Override
     public VideoResponse generate(VideoRequest request) {
         long start = System.currentTimeMillis();
-        ScheduledExecutorService poller = startProgressPoller();
+        ScheduledExecutorService poller = startProgressPoller(request.getOwnerId());
         try {
             Files.createDirectories(outputDir);
             ObjectNode body = buildPayload(request);
@@ -93,9 +93,10 @@ public class RemotionVideoProvider implements VideoProvider {
     }
 
     /** Polls the renderer's /video/progress endpoint while the (blocking) render runs and
-     *  relays frame-level progress to all SSE subscribers as `video.render.progress` events. */
-    private ScheduledExecutorService startProgressPoller() {
-        if (sseController == null) return null;
+     *  relays frame-level progress as `video.render.progress` events, scoped to the mission
+     *  owner so concurrent renders for different users never leak into each other's stream. */
+    private ScheduledExecutorService startProgressPoller(java.util.UUID ownerId) {
+        if (sseController == null || ownerId == null) return null;
         ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "video-render-progress");
             t.setDaemon(true);
@@ -107,7 +108,7 @@ public class RemotionVideoProvider implements VideoProvider {
                 String json = fetchProgress();
                 if (json != null && !json.isBlank() && !json.equals(last.get())) {
                     last.set(json);
-                    sseController.sendEvent("video.render.progress", json);
+                    sseController.sendEvent(ownerId, "video.render.progress", json);
                 }
             } catch (Exception ignored) {
                 // a failed poll is non-fatal; the next tick retries
@@ -148,7 +149,10 @@ public class RemotionVideoProvider implements VideoProvider {
         body.put("transitionDuration", Math.max(0, transitionFrames));
         String sceneMotion = request.getSceneMotion();
         if (sceneMotion != null && !sceneMotion.isBlank()) {
-            body.put("sceneMotion", "static".equalsIgnoreCase(sceneMotion) ? "static" : "animated");
+            String normalized = sceneMotion.equalsIgnoreCase("static") ? "static"
+                : sceneMotion.equalsIgnoreCase("hybrid") ? "hybrid"
+                : "animated";
+            body.put("sceneMotion", normalized);
         }
         if (request.getTransition() != null && !request.getTransition().isBlank()) {
             body.put("transition", request.getTransition());

@@ -2,9 +2,12 @@ package com.karmaos.media;
 
 import lombok.Data;
 import java.util.List;
+import java.util.UUID;
 
 @Data
 public class VideoRequest {
+    /** Owning user, used to scope SSE render-progress events to that user only. */
+    private UUID ownerId;
     private String title;
     private String script;
     private String audioUrl;

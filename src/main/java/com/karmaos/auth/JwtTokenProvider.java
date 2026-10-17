@@ -22,6 +22,7 @@ import java.util.UUID;
 public class JwtTokenProvider {
 
     private static final Logger log = LoggerFactory.getLogger(JwtTokenProvider.class);
+    private static final long STREAM_TOKEN_EXPIRATION_MS = 15 * 60 * 1000L; // 15 minutes
 
     private final SecretKey secretKey;
     private final long expirationMs;
@@ -46,6 +47,34 @@ public class JwtTokenProvider {
                 .expiration(new Date(now.getTime() + expirationMs))
                 .signWith(secretKey)
                 .compact();
+    }
+
+    /**
+     * Short-lived, purpose-scoped token for URLs that can't carry an Authorization header
+     * (EventSource/SSE, {@code <video>}/{@code <img>} src). Kept short so a leaked URL
+     * (server access logs, browser history, proxies) exposes only a narrow window instead
+     * of the full-session access token.
+     */
+    public String generateStreamToken(UUID userId, String email, List<String> roles) {
+        Date now = new Date();
+        return Jwts.builder()
+                .subject(userId.toString())
+                .claim("email", email)
+                .claim("roles", roles)
+                .claim("type", "stream")
+                .issuedAt(now)
+                .expiration(new Date(now.getTime() + STREAM_TOKEN_EXPIRATION_MS))
+                .signWith(secretKey)
+                .compact();
+    }
+
+    public boolean isStreamToken(String token) {
+        try {
+            Claims claims = parseToken(token);
+            return "stream".equals(claims.get("type", String.class));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public String generateRefreshToken(UUID userId) {

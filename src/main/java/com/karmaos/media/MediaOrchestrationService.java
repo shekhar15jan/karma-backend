@@ -1,9 +1,16 @@
 package com.karmaos.media;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.karmaos.access.OwnershipService;
 import com.karmaos.agent.Agent;
 import com.karmaos.agent.AgentRepository;
+import com.karmaos.agent.AgentRuntimeService;
+import com.karmaos.flow.Flow;
+import com.karmaos.flow.FlowRepository;
+import com.karmaos.llm.LLMResponse;
 import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.artifact.ArtifactStorageService;
@@ -28,12 +35,18 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 @Service
 public class MediaOrchestrationService {
@@ -73,6 +86,14 @@ public class MediaOrchestrationService {
     private final ExecutionRepository executionRepository;
     private final AgentSkillRepository agentSkillRepository;
     private final VisualDirectorService visualDirectorService;
+    private final OwnershipService ownershipService;
+    private final AgentRuntimeService agentRuntimeService;
+    private final FlowRepository flowRepository;
+    private final String rendererUrl;
+
+    private static final long DIRECTOR_CATALOGUE_CACHE_TTL_MS = 10 * 60 * 1000;
+    private volatile Set<String> directorKnownFrameIds;
+    private volatile long directorKnownFrameIdsFetchedAt;
 
     public MediaOrchestrationService(ImageProviderFactory imageProviderFactory,
                                       VoiceProviderFactory voiceProviderFactory,
@@ -91,7 +112,11 @@ public class MediaOrchestrationService {
                                       ExecutionStepRepository executionStepRepository,
                                       ExecutionRepository executionRepository,
                                       AgentSkillRepository agentSkillRepository,
-                                      VisualDirectorService visualDirectorService) {
+                                      VisualDirectorService visualDirectorService,
+                                      OwnershipService ownershipService,
+                                      AgentRuntimeService agentRuntimeService,
+                                      FlowRepository flowRepository,
+                                      @Value("${RENDERER_URL:http://localhost:3000}") String rendererUrl) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
         this.videoProviderFactory = videoProviderFactory;
@@ -110,6 +135,10 @@ public class MediaOrchestrationService {
         this.executionRepository = executionRepository;
         this.agentSkillRepository = agentSkillRepository;
         this.visualDirectorService = visualDirectorService;
+        this.ownershipService = ownershipService;
+        this.agentRuntimeService = agentRuntimeService;
+        this.flowRepository = flowRepository;
+        this.rendererUrl = rendererUrl;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
@@ -515,6 +544,255 @@ public class MediaOrchestrationService {
         artifactRepository.save(artifact);
     }
 
+    /**
+     * Director Agent — picks the best-fit rendering frame per scene from the full
+     * catalogue, instead of the script writer guessing from a fixed prompt list.
+     * Ships behind two flags (video.director_enabled / video.director_shadow_mode);
+     * when both are off this is a visible no-op passthrough. Never fails the
+     * execution — any error here just leaves the script unchanged.
+     */
+    public ExecutionStep executeDirectorStep(UUID executionId, UUID flowId, UUID agentId,
+                                             int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
+        ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "SCENE_DIRECTION", contextData, missionId);
+
+        boolean enabled = runtimeSettings.getBoolean(RuntimeSettings.KEY_VIDEO_DIRECTOR_ENABLED, false);
+        boolean shadow = runtimeSettings.getBoolean(RuntimeSettings.KEY_VIDEO_DIRECTOR_SHADOW, false);
+
+        if (!enabled && !shadow) {
+            step.setStatus("COMPLETED");
+            step.setOutputData(contextData);
+            step.setCompletedAt(LocalDateTime.now());
+            return executionService.saveStep(executionId, step);
+        }
+
+        try {
+            requireAgentSkill(agentId);
+            Agent agent = agentRepository.findById(agentId).orElse(null);
+            if (agent == null) {
+                throw new RuntimeException("Director agent not found: " + agentId);
+            }
+            Flow flow = flowId != null ? flowRepository.findByIdAndStatus(flowId, "ACTIVE").orElse(null) : null;
+
+            String originalScript = resolveScriptForVideo(executionId, contextData);
+            String jsonCandidate = extractJson(originalScript);
+            JsonNode scriptRoot = objectMapper.readTree(jsonCandidate != null ? jsonCandidate : originalScript);
+            JsonNode body = scriptRoot.path("script_body");
+            if (!body.isArray() || body.isEmpty()) {
+                throw new RuntimeException("No script_body scenes found to direct");
+            }
+
+            Set<String> knownFrameIds = fetchKnownFrameIds();
+            if (knownFrameIds.isEmpty()) {
+                throw new RuntimeException("Catalogue unavailable — no known frame ids");
+            }
+
+            String systemPrompt = agentRuntimeService.buildSystemPrompt(agent, flow, missionId);
+            String userMessage = buildDirectorUserMessage(body);
+            Provider provider = agent.getDefaultProviderId() != null
+                    ? providerRepository.findById(agent.getDefaultProviderId()).orElse(null) : null;
+            int maxTokens = runtimeSettings.getInt(RuntimeSettings.KEY_MAX_TOKENS_REASONING, 4096);
+            Predicate<String> validator = content -> isDirectorOutputValid(content, knownFrameIds);
+
+            LLMResponse response = agentRuntimeService.executeWithRetryAndFallback(
+                    agent, provider, step, systemPrompt, userMessage, missionId, maxTokens, validator, false);
+
+            step.setPromptTokens(response.getPromptTokens());
+            step.setCompletionTokens(response.getCompletionTokens());
+            step.setTotalTokens(response.getTotalTokens());
+            step.setLatencyMs((int) response.getLatencyMs());
+
+            Map<Integer, String> chosen = parseDirectorChoices(response.getContent(), knownFrameIds);
+
+            ObjectNode patchedRoot = (ObjectNode) scriptRoot.deepCopy();
+            ArrayNode patchedBody = (ArrayNode) patchedRoot.get("script_body");
+            ArrayNode validatePayload = objectMapper.createArrayNode();
+            for (Map.Entry<Integer, String> entry : chosen.entrySet()) {
+                int idx = entry.getKey();
+                if (idx < 0 || idx >= patchedBody.size()) continue;
+                JsonNode section = patchedBody.get(idx);
+                if (!section.hasNonNull("visual_spec") || !section.get("visual_spec").isObject()) continue;
+                JsonNode vs = section.get("visual_spec");
+                ObjectNode item = objectMapper.createObjectNode();
+                item.put("sceneIndex", idx);
+                item.put("frameId", entry.getValue());
+                item.set("components", vs.has("components") ? vs.get("components") : objectMapper.createArrayNode());
+                validatePayload.add(item);
+            }
+
+            int fallbackCount = 0;
+            int totalDirected = validatePayload.size();
+            if (totalDirected > 0) {
+                JsonNode validateResult = validateAssignments(validatePayload);
+                if (validateResult != null && validateResult.path("results").isArray()) {
+                    for (JsonNode r : validateResult.get("results")) {
+                        int idx = r.path("sceneIndex").asInt(-1);
+                        if (idx < 0) continue;
+                        if (r.path("unsatisfied").asBoolean(false)) {
+                            chosen.remove(idx); // revert — leave this scene's original layout
+                            continue;
+                        }
+                        String resolvedFrame = r.path("resolvedFrame").asText(null);
+                        if (resolvedFrame != null && !resolvedFrame.equals(chosen.get(idx))) {
+                            fallbackCount++; // fell back within assignWithFallback's own chain
+                            chosen.put(idx, resolvedFrame);
+                        }
+                    }
+                } else {
+                    // Validation call itself failed — don't trust any unvalidated choice.
+                    chosen.clear();
+                }
+            }
+
+            int patchedCount = 0;
+            for (Map.Entry<Integer, String> entry : chosen.entrySet()) {
+                JsonNode section = patchedBody.get(entry.getKey());
+                if (section == null || !section.hasNonNull("visual_spec") || !section.get("visual_spec").isObject()) continue;
+                ((ObjectNode) section.get("visual_spec")).put("layout", entry.getValue());
+                patchedCount++;
+            }
+
+            log.info("Director step: {}/{} scenes directed ({} fallback-walked), enabled={}, shadow={}, mission {}",
+                    patchedCount, totalDirected, fallbackCount, enabled, shadow, missionId);
+
+            step.setOutputData(enabled && patchedCount > 0 ? patchedRoot.toString() : contextData);
+            step.setStatus("COMPLETED");
+        } catch (Exception e) {
+            log.warn("Director step failed, passing script through unchanged: {}", e.getMessage());
+            step.setStatus("COMPLETED");
+            step.setOutputData(contextData);
+            step.setErrorMessage(e.getMessage());
+        }
+
+        step.setCompletedAt(LocalDateTime.now());
+        return executionService.saveStep(executionId, step);
+    }
+
+    /** Frame ids the renderer actually has a component for, cached briefly — this is
+     *  the only piece of catalogue state fetched live; the human-readable frame
+     *  descriptions that drive WHICH frame gets chosen live in the skill's system
+     *  prompt (generated once from the catalogue, see V44 migration), not here. */
+    private Set<String> fetchKnownFrameIds() {
+        Set<String> cached = directorKnownFrameIds;
+        if (cached != null && System.currentTimeMillis() - directorKnownFrameIdsFetchedAt < DIRECTOR_CATALOGUE_CACHE_TTL_MS) {
+            return cached;
+        }
+        try {
+            HttpURLConnection conn = (HttpURLConnection)
+                    new URI(rendererUrl.replaceAll("/+$", "") + "/catalogue").toURL().openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(5000);
+            int code = conn.getResponseCode();
+            if (code != 200) return cached != null ? cached : Set.of();
+            String body;
+            try (InputStream is = conn.getInputStream()) {
+                body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            JsonNode root = objectMapper.readTree(body);
+            Set<String> ids = new java.util.HashSet<>();
+            for (JsonNode f : root.path("frames")) {
+                if (f.path("migrated").asBoolean(false)) {
+                    ids.add(f.path("id").asText());
+                }
+            }
+            directorKnownFrameIds = ids;
+            directorKnownFrameIdsFetchedAt = System.currentTimeMillis();
+            return ids;
+        } catch (Exception e) {
+            log.warn("Director: catalogue fetch failed: {}", e.getMessage());
+            return cached != null ? cached : Set.of();
+        }
+    }
+
+    private String buildDirectorUserMessage(JsonNode body) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Choose the best-fit frame_id for each scene below, from the frame catalogue described in your ")
+          .append("skill instructions. Respond with ONLY this JSON, no markdown fences, no commentary:\n")
+          .append("{\"scenes\":[{\"sceneIndex\":0,\"frame_id\":\"...\",\"intent\":\"...\"}]}\n\nScenes:\n");
+        for (int i = 0; i < body.size(); i++) {
+            JsonNode section = body.get(i);
+            JsonNode vs = section.path("visual_spec");
+            String title = vs.path("title").asText("");
+            String narration = section.path("speaker_text").asText("");
+            String heading = !title.isBlank() ? title : narration.substring(0, Math.min(60, narration.length()));
+            String currentLayout = vs.path("layout").asText("standard-content");
+            String excerpt = narration.length() > 200 ? narration.substring(0, 200) + "..." : narration;
+            sb.append(i).append(". [current: ").append(currentLayout).append("] ")
+              .append(heading).append(" — ").append(excerpt).append("\n");
+        }
+        return sb.toString();
+    }
+
+    private boolean isDirectorOutputValid(String content, Set<String> knownFrameIds) {
+        if (content == null || content.isBlank()) return false;
+        try {
+            String json = extractJson(content);
+            JsonNode root = objectMapper.readTree(json != null ? json : content);
+            JsonNode scenes = root.path("scenes");
+            if (!scenes.isArray() || scenes.isEmpty()) return false;
+            for (JsonNode s : scenes) {
+                String frameId = s.path("frame_id").asText(null);
+                if (frameId == null || !knownFrameIds.contains(frameId)) return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private Map<Integer, String> parseDirectorChoices(String content, Set<String> knownFrameIds) {
+        Map<Integer, String> result = new java.util.LinkedHashMap<>();
+        if (content == null) return result;
+        try {
+            String json = extractJson(content);
+            JsonNode root = objectMapper.readTree(json != null ? json : content);
+            for (JsonNode s : root.path("scenes")) {
+                int idx = s.path("sceneIndex").asInt(-1);
+                String frameId = s.path("frame_id").asText(null);
+                if (idx >= 0 && frameId != null && knownFrameIds.contains(frameId)) {
+                    result.put(idx, frameId);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Director: failed to parse frame choices: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    /** One authoritative round trip to confirm the Director's choices are actually
+     *  slot-satisfiable against real scene components — assignWithFallback's own
+     *  fallback-chain walk happens server-side inside this single call. */
+    private JsonNode validateAssignments(ArrayNode scenesPayload) {
+        try {
+            ObjectNode payload = objectMapper.createObjectNode();
+            payload.set("scenes", scenesPayload);
+            HttpURLConnection conn = (HttpURLConnection)
+                    new URI(rendererUrl.replaceAll("/+$", "") + "/catalogue/validate").toURL().openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(8000);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(objectMapper.writeValueAsBytes(payload));
+            }
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            String body;
+            try (InputStream is = stream) {
+                body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            if (code < 200 || code >= 300) {
+                log.warn("Director: validate call returned HTTP {}: {}", code, body);
+                return null;
+            }
+            return objectMapper.readTree(body);
+        } catch (Exception e) {
+            log.warn("Director: validate call failed: {}", e.getMessage());
+            return null;
+        }
+    }
+
     public ExecutionStep executeMusicStep(UUID executionId, UUID flowId, UUID agentId,
                                           int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "MUSIC_GENERATION", contextData, missionId);
@@ -591,6 +869,11 @@ public class MediaOrchestrationService {
             VideoRequest request = new VideoRequest();
             String missionLabel = resolveMissionName(missionId);
             request.setTitle(missionLabel);
+            try {
+                request.setOwnerId(ownershipService.resolveMissionOwnerId(missionId));
+            } catch (Exception e) {
+                log.warn("Could not resolve mission owner for SSE-scoped render progress: missionId={}", missionId);
+            }
             String script = resolveScriptForVideo(executionId, contextData);
             if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
                 script += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
@@ -629,10 +912,14 @@ public class MediaOrchestrationService {
                 }
             }
 
-            // Remotion is the only supported video provider
-            List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages);
-            // Production Wiring: V2 Visual Director — enrich with semantic intent (preserves V1)
+            // Production Wiring: V2 Visual Director — enrich with semantic intent (preserves V1).
+            // Computed BEFORE buildRemotionScenes so it can gate the scene-level V2 auto-detection
+            // below too — otherwise a scene carrying stray visual_spec_v2/objects/visualIntent
+            // fields (a schema-drifted LLM chunk, or leftover authoring habit) silently routes
+            // through the V2 SemanticScene renderer even while the admin setting says V1.
             String renderingMode = runtimeSettings.getString(com.karmaos.visual.VisualDirectorService.KEY_VIDEO_RENDERING_MODE, "V1");
+            // Remotion is the only supported video provider
+            List<VideoScene> scenes = buildRemotionScenes(script, sceneAudio, audioUrl, sceneImages, renderingMode);
             if ("V2".equalsIgnoreCase(renderingMode)) {
                 visualDirectorService.enrichVideoScenes(scenes);
                 log.info("V2 rendering mode enabled — enriched {} scenes with semantic intent", scenes.size());
@@ -845,7 +1132,9 @@ public class MediaOrchestrationService {
     private List<VideoScene> buildRemotionScenes(String script,
                                                  java.util.Map<Integer, String> sceneAudio,
                                                  String combinedAudio,
-                                                 java.util.Map<Integer, String> sceneImages) {
+                                                 java.util.Map<Integer, String> sceneImages,
+                                                 String renderingMode) {
+        boolean allowV2Signals = "V2".equalsIgnoreCase(renderingMode);
         List<VideoScene> scenes = new java.util.ArrayList<>();
         if (script == null || script.isBlank()) return scenes;
 
@@ -862,8 +1151,14 @@ public class MediaOrchestrationService {
                 com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
                 if (body != null && body.isArray()) {
                     for (com.fasterxml.jackson.databind.JsonNode section : body) {
-                        // V2 versioned structure: visual_spec_v2 or semantic fields at scene level
-                        if (section.hasNonNull("visual_spec_v2") && section.get("visual_spec_v2").isObject()) {
+                        // V2 versioned structure: visual_spec_v2 or semantic fields at scene level.
+                        // Every branch that can produce a v2-schema spec is gated on allowV2Signals —
+                        // when the admin setting is V1, a scene carrying stray visual_spec_v2/objects/
+                        // visualIntent fields (schema-drifted LLM output, or leftover authoring habit)
+                        // must NOT silently opt itself into the V2 SemanticScene renderer, which only
+                        // draws generic labeled nodes and discards real component content (code blocks,
+                        // cards, bullet lists, charts). See KARMA_OS video-rendering-mode root cause.
+                        if (allowV2Signals && section.hasNonNull("visual_spec_v2") && section.get("visual_spec_v2").isObject()) {
                             // Explicit V2 spec — preserve as-is with schemaVersion
                             com.fasterxml.jackson.databind.node.ObjectNode v2 = (com.fasterxml.jackson.databind.node.ObjectNode) section.get("visual_spec_v2").deepCopy();
                             if (!v2.has("schemaVersion")) v2.put("schemaVersion", "v2");
@@ -871,21 +1166,23 @@ public class MediaOrchestrationService {
                         } else if (section.hasNonNull("visual_spec") && section.get("visual_spec").isObject()) {
                             // V1 visual_spec — check if scene also has V2 semantic fields at top level (objects/events/visualIntent)
                             com.fasterxml.jackson.databind.node.ObjectNode vs = (com.fasterxml.jackson.databind.node.ObjectNode) section.get("visual_spec").deepCopy();
-                            // Merge V2 semantic fields if present at scene level (objects, events, visualIntent, sceneId)
-                            if (section.has("objects") && section.get("objects").isArray()) vs.set("semanticObjects", section.get("objects"));
-                            if (section.has("events") && section.get("events").isArray()) vs.set("semanticAnimations", section.get("events"));
-                            if (section.hasNonNull("visualIntent")) vs.set("visualIntent", section.get("visualIntent"));
-                            if (section.hasNonNull("sceneId")) vs.set("sceneId", section.get("sceneId"));
-                            if (section.has("narration") && section.get("narration").isObject() && section.get("narration").has("text")) {
-                                // keep narration for reference
-                                vs.set("narration", section.get("narration"));
+                            if (allowV2Signals) {
+                                // Merge V2 semantic fields if present at scene level (objects, events, visualIntent, sceneId)
+                                if (section.has("objects") && section.get("objects").isArray()) vs.set("semanticObjects", section.get("objects"));
+                                if (section.has("events") && section.get("events").isArray()) vs.set("semanticAnimations", section.get("events"));
+                                if (section.hasNonNull("visualIntent")) vs.set("visualIntent", section.get("visualIntent"));
+                                if (section.hasNonNull("sceneId")) vs.set("sceneId", section.get("sceneId"));
+                                if (section.has("narration") && section.get("narration").isObject() && section.get("narration").has("text")) {
+                                    // keep narration for reference
+                                    vs.set("narration", section.get("narration"));
+                                }
+                                // Mark as V2 if semantic fields were merged
+                                if (vs.has("semanticObjects") || vs.has("visualIntent")) vs.put("schemaVersion", "v2");
                             }
-                            // Mark as V2 if semantic fields were merged
-                            if (vs.has("semanticObjects") || vs.has("visualIntent")) vs.put("schemaVersion", "v2");
                             specJsons.add(vs.toString());
                         } else if (section.hasNonNull("diagram_spec") && section.get("diagram_spec").isObject()) {
                             specJsons.add(section.get("diagram_spec").toString());
-                        } else if (section.has("objects") || section.has("events") || section.has("visualIntent")) {
+                        } else if (allowV2Signals && (section.has("objects") || section.has("events") || section.has("visualIntent"))) {
                             // Pure V2 scene without legacy visual_spec — create minimal V2 spec from semantic fields
                             com.fasterxml.jackson.databind.node.ObjectNode v2 = objectMapper.createObjectNode();
                             v2.put("schemaVersion", "v2");

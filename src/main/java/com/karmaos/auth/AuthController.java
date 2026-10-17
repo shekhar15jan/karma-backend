@@ -2,6 +2,8 @@ package com.karmaos.auth;
 
 import com.karmaos.common.ApiResponse;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,5 +39,11 @@ public class AuthController {
     @PostMapping("/dev-bypass")
     public ResponseEntity<ApiResponse<AuthResponse>> devBypass(@Valid @RequestBody LoginRequest request) {
         return ResponseEntity.ok(ApiResponse.ok(authService.devBypass(request)));
+    }
+
+    /** Short-lived token for SSE/media-stream URLs that can't carry an Authorization header. */
+    @GetMapping("/stream-token")
+    public ResponseEntity<ApiResponse<StreamTokenResponse>> streamToken(@AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(ApiResponse.ok(authService.issueStreamToken(user)));
     }
 }

@@ -27,6 +27,8 @@ public class RuntimeSettings {
     public static final String KEY_VIDEO_RESOLUTION = "video.resolution";
     public static final String KEY_VIDEO_SCENE_MOTION = "video.scene_motion";
     public static final String KEY_VIDEO_CHUNK_DELAY_MS = "video.chunk_delay_ms";
+    public static final String KEY_VIDEO_DIRECTOR_ENABLED = "video.director_enabled";
+    public static final String KEY_VIDEO_DIRECTOR_SHADOW = "video.director_shadow_mode";
 
     private final SettingsRepository settingsRepository;
     private final ObjectMapper objectMapper;

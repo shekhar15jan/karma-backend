@@ -200,7 +200,11 @@ public class WorkflowService {
     }
 
     public List<WorkflowDefinition> listAllDefinitions(UUID userId) {
-        return definitionRepository.findAllByOrderByCreatedAtDesc();
+        List<UUID> ownedProjectIds = ownershipService.getOwnedProjectIds(userId);
+        if (ownedProjectIds.isEmpty()) {
+            return List.of();
+        }
+        return definitionRepository.findByProjectIdInOrderByCreatedAtDesc(ownedProjectIds);
     }
 
     @Transactional
