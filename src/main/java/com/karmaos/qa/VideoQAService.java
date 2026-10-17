@@ -429,13 +429,8 @@ public class VideoQAService {
                 out.add("scene " + idx + ": audio narration level — duration " + String.format("%.1f", duration) + "s shorter than expected " + String.format("%.1f", expectedSec) + "s for text length (possible -14LUFS pacing issue)");
             }
         }
-        // music duck -20dB: if request has music and scene has narration, musicVolume should be low
-        if (request != null && request.getMusicUrl() != null && !request.getMusicUrl().isBlank() && hasAudio) {
-            // heuristic: if musicVolume field unknown, we check request existence; real duck is 0.05 in renderer
-            // Flag if request.getMusic* not configured to duck — we can't know volume here, so soft check
-            // If narration active and no duck metadata, warn once per video (idx 0)
-            if (idx == 0) out.add("audio music duck — video has music + narration; ensure music ducked to -20dB (0.05) during narration (verify KarmaVideo MusicDucking)");
-        }
+        // Music ducking under narration is done by the renderer (KarmaVideo MusicDucking), so there
+        // is nothing to check per request here.
         // SFX collision: timelineEvents with same timestamp
         if (spec.has("timelineEvents") && spec.get("timelineEvents").isArray()) {
             Map<Long, Integer> counts = new HashMap<>();

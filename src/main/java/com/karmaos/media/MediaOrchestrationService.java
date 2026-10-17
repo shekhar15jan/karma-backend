@@ -828,6 +828,14 @@ public class MediaOrchestrationService {
         }
     }
 
+    /** Completes the music step without a track; the renderer then uses its bundled music bed. */
+    private ExecutionStep completeWithoutMusic(UUID executionId, ExecutionStep step, String reason) {
+        step.setStatus("COMPLETED");
+        step.setOutputData("No generated music (" + reason + "); the renderer's default music bed will be used.");
+        step.setCompletedAt(LocalDateTime.now());
+        return executionService.saveStep(executionId, step);
+    }
+
     public ExecutionStep executeMusicStep(UUID executionId, UUID flowId, UUID agentId,
                                           int stepOrder, String contextData, UUID missionId, String reviewerFeedback) {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "MUSIC_GENERATION", contextData, missionId);
@@ -839,9 +847,11 @@ public class MediaOrchestrationService {
                 provider = resolveProviderForCapability(MUSIC_PROVIDER_TYPES, "google-music");
             }
             String apiKey = provider != null ? getApiKey(provider) : "";
-            MusicProvider musicProvider = (provider != null && !apiKey.isEmpty())
-                ? musicProviderFactory.getProvider(provider.getProviderType(), apiKey)
-                : musicProviderFactory.getFallbackProvider();
+            if (provider == null || apiKey.isEmpty()) {
+                // The mock fallback stored a placeholder example.com URL as the mission's music.
+                return completeWithoutMusic(executionId, step, "no music provider is configured");
+            }
+            MusicProvider musicProvider = musicProviderFactory.getProvider(provider.getProviderType(), apiKey);
 
             MusicRequest request = new MusicRequest();
             String prompt = contextData != null && !contextData.isBlank()
@@ -875,8 +885,9 @@ public class MediaOrchestrationService {
                 artifactStorageService.persist(artifact, missionId);
                 artifactRepository.save(artifact);
             } else {
-                step.setStatus("FAILED");
-                step.setErrorMessage(response.getErrorMessage());
+                // Music is optional: a paid-only model (Lyria) refusing a free key must not fail the mission.
+                log.warn("Music generation failed: {}", response.getErrorMessage());
+                return completeWithoutMusic(executionId, step, "music generation failed: " + response.getErrorMessage());
             }
         } catch (Exception e) {
             log.error("Music step failed: agentId={}", agentId, e);
