@@ -992,7 +992,7 @@ public class MediaOrchestrationService {
             VideoCaptionsConfig captionsConfig = new VideoCaptionsConfig();
             captionsConfig.setBurnIn(true);
             captionsConfig.setPreset("youtube");
-            captionsConfig.setPosition(0.9);
+            captionsConfig.setPosition(0.93);
             captionsConfig.setFontSize(40);
             captionsConfig.setMaxCharsPerLine(48);
             request.setCaptions(captionsConfig);
