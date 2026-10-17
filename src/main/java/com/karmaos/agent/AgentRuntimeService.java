@@ -391,6 +391,13 @@ public class AgentRuntimeService {
             }
         }
 
+        LLMResponse repair = repairNarrationLengths(agent, primaryProvider, step, allScenes, target, missionId, maxTokens);
+        if (repair != null) {
+            totalPrompt += repair.getPromptTokens();
+            totalCompletion += repair.getCompletionTokens();
+            totalLatency += repair.getLatencyMs();
+        }
+
         ObjectNode merged = objectMapper.createObjectNode();
         merged.put("title", title != null ? title : "Untitled");
         merged.set("script_body", allScenes);
@@ -409,6 +416,41 @@ public class AgentRuntimeService {
         log.info("Iterative script generation complete: {} scenes across {} chunks",
                 allScenes.size(), chunks.size());
         return mergedJson;
+    }
+
+    /**
+     * Sends the scenes whose narration misses its word range back for one targeted rewrite
+     * (see {@link NarrationLength}). Best effort: a failed call leaves the script as written.
+     *
+     * @return the rewrite response, or null when nothing needed fixing or the call failed
+     */
+    private LLMResponse repairNarrationLengths(Agent agent, Provider provider, ExecutionStep step, ArrayNode scenes,
+                                               StoryTarget target, UUID missionId, int maxTokens) {
+        List<NarrationLength.Miss> misses = NarrationLength.misses(scenes, target.wordsPerScene(), SCENE_WORD_SLACK);
+        if (misses.isEmpty()) return null;
+        int before = 0;
+        for (JsonNode scene : scenes) before += NarrationLength.words(scene.path("speaker_text").asText(""));
+        log.info("{} of {} scenes miss their narration word range ({} words total); requesting a rewrite",
+                misses.size(), scenes.size(), before);
+        try {
+            LLMResponse response = executeWithRetryAndFallback(agent, provider, step,
+                    NarrationLength.repairSystemPrompt(), NarrationLength.repairUserMessage(misses), missionId,
+                    maxTokens, NarrationLength::isRepairResponse, false,
+                    "Your previous response was not the requested JSON. Output ONLY {\"scenes\": [{\"scene_number\": <n>, "
+                            + "\"speaker_text\": \"...\"}]} for the listed scenes, nothing else.");
+            if (!response.isSuccess()) {
+                log.warn("Narration length rewrite failed, keeping the script as written: {}", response.getErrorMessage());
+                return null;
+            }
+            int updated = NarrationLength.apply(scenes, misses, response.getContent());
+            int after = 0;
+            for (JsonNode scene : scenes) after += NarrationLength.words(scene.path("speaker_text").asText(""));
+            log.info("Narration length rewrite updated {} of {} scenes: {} -> {} words", updated, misses.size(), before, after);
+            return response;
+        } catch (Exception e) {
+            log.warn("Narration length rewrite failed, keeping the script as written: {}", e.getMessage());
+            return null;
+        }
     }
 
     private boolean isIterativeScriptMode(Agent agent) {
@@ -758,6 +800,18 @@ public class AgentRuntimeService {
     public LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
                                                     String systemPrompt, String userMessage, UUID missionId, int maxTokens,
                                                     Predicate<String> validator, boolean chunkMode) {
+        return executeWithRetryAndFallback(agent, primaryProvider, step, systemPrompt, userMessage, missionId,
+                maxTokens, validator, chunkMode, null);
+    }
+
+    /**
+     * As above, with {@code correction} replacing the agent-specific corrective instruction sent
+     * on a retry: a script writer's default asks for a whole script, which is wrong for a call
+     * that wants a different JSON shape.
+     */
+    LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
+                                            String systemPrompt, String userMessage, UUID missionId, int maxTokens,
+                                            Predicate<String> validator, boolean chunkMode, String correction) {
         final int maxAttempts = 3;
         LLMResponse lastResponse = null;
         String correctiveHint = "";
@@ -886,7 +940,9 @@ public class AgentRuntimeService {
             }
 
             if (attempt < maxAttempts) {
-                if (isStoryScriptWriter(agent)) {
+                if (correction != null) {
+                    correctiveHint = "\n\nCORRECTIVE INSTRUCTION: " + correction;
+                } else if (isStoryScriptWriter(agent)) {
                     if (chunkMode) {
                         correctiveHint = "\n\nCORRECTIVE INSTRUCTION: Your previous response was rejected because it did NOT "
                             + "conform to the mandated chunk JSON schema. Respond with a SINGLE raw JSON object only "
