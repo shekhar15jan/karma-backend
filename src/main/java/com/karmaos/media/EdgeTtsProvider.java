@@ -94,6 +94,11 @@ public class EdgeTtsProvider implements VoiceProvider {
             }
 
             log.info("Executing Edge TTS command: {}", String.join(" ", pb.command()));
+            // edge-tts (aiohttp) ignores proxy env vars; pass the standard one explicitly.
+            String proxy = System.getenv("HTTPS_PROXY") != null ? System.getenv("HTTPS_PROXY") : System.getenv("https_proxy");
+            if (proxy != null && !proxy.isBlank()) {
+                pb.command().addAll(List.of("--proxy", proxy));
+            }
 
             pb.redirectErrorStream(true);
             Process process = pb.start();
