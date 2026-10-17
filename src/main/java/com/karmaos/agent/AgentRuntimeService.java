@@ -791,6 +791,8 @@ public class AgentRuntimeService {
             log.debug("Failed to build extended provider chain: {}", e.getMessage());
         }
         Provider[] chain = chainList.toArray(new Provider[0]);
+        // provider id + model that answered "overloaded"; later attempts switch to another model.
+        Set<String> overloadedModels = new HashSet<>();
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             for (Provider provider : chain) {
@@ -799,6 +801,13 @@ public class AgentRuntimeService {
                     continue;
                 }
                 String modelUsed = resolveModel(agent, provider, llmProvider);
+                if (overloadedModels.contains(provider.getId() + ":" + modelUsed)) {
+                    String alternative = alternativeModel(provider, overloadedModels);
+                    if (alternative != null) {
+                        log.info("Model {} is overloaded; trying {} on provider {}", modelUsed, alternative, provider.getName());
+                        modelUsed = alternative;
+                    }
+                }
                 LLMRequest request = new LLMRequest(systemPrompt, userMessage + correctiveHint);
                 request.setModel(modelUsed);
                 request.setTemperature(resolveTemperature(agent));
@@ -839,6 +848,20 @@ public class AgentRuntimeService {
                     : "provider error: " + lastResponse.getErrorMessage();
                 log.warn("Agent {} attempt {}/{} via provider {} failed: {}",
                         agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName(), reason);
+
+                if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null
+                        && isOverloadError(lastResponse.getErrorMessage())) {
+                    overloadedModels.add(provider.getId() + ":" + modelUsed);
+                    if (alternativeModel(provider, overloadedModels) == null && attempt < maxAttempts) {
+                        long sleepTime = 15_000L * attempt;
+                        log.warn("Provider {} overloaded with no alternative model; waiting {} ms before retry", provider.getName(), sleepTime);
+                        try {
+                            Thread.sleep(sleepTime);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                }
 
                 if (!lastResponse.isSuccess() && lastResponse.getErrorMessage() != null) {
                     String err = lastResponse.getErrorMessage().toLowerCase();
@@ -1513,6 +1536,28 @@ public class AgentRuntimeService {
             log.warn("Failed to create provider for type={}, using mock", provider.getProviderType(), e);
             return providerFactory.getFallbackProvider();
         }
+    }
+
+    /** Transient capacity errors (HTTP 503 / "high demand" / "overloaded"), distinct from bad requests. */
+    private static boolean isOverloadError(String message) {
+        String m = message.toLowerCase();
+        return m.contains("503") || m.contains("service unavailable") || m.contains("overloaded")
+                || m.contains("high demand") || m.contains("unavailable");
+    }
+
+    /** Next configured text model on the provider that has not been reported overloaded, or null. */
+    private String alternativeModel(Provider provider, Set<String> overloadedModels) {
+        if (provider.getModels() == null || provider.getModels().isBlank()) return null;
+        try {
+            List<String> models = objectMapper.readValue(provider.getModels(), new TypeReference<List<String>>() {});
+            for (String model : models) {
+                if (com.karmaos.provider.ModelRanker.isTextChatModel(model)
+                        && !overloadedModels.contains(provider.getId() + ":" + model)) {
+                    return model;
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     private String resolveModel(Agent agent, Provider provider, LLMProvider llmProvider) {
