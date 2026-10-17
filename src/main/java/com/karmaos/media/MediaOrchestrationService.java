@@ -470,6 +470,16 @@ public class MediaOrchestrationService {
                     sceneRequest.setVoice(voiceProvider.getDefaultModel());
                 }
                 VoiceResponse sceneResponse = voiceProvider.synthesize(sceneRequest);
+                if (!sceneResponse.isSuccess() && !(voiceProvider instanceof EdgeTtsProvider)) {
+                    // e.g. a Gemini key is not enabled for Cloud Text-to-Speech (401): fall back to keyless
+                    // Edge TTS for this and every remaining scene instead of failing the whole step.
+                    log.warn("Voice provider {} failed ({}); switching to Edge TTS for the remaining narration",
+                            voiceProvider.getName(), sceneResponse.getErrorMessage());
+                    voiceProvider = new EdgeTtsProvider();
+                    sceneRequest.setModel(voiceProvider.getDefaultModel());
+                    sceneRequest.setVoice(voiceProvider.getDefaultModel());
+                    sceneResponse = voiceProvider.synthesize(sceneRequest);
+                }
                 if (sceneResponse.isSuccess()) {
                     sceneAudioUrls.add(sceneResponse.getAudioUrl());
                     persistSceneAudioArtifact(missionId, "Scene Narration " + (i + 1), sceneResponse.getAudioUrl(),

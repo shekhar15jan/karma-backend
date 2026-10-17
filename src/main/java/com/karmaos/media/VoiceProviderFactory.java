@@ -42,15 +42,12 @@ public class VoiceProviderFactory {
         };
     }
 
+    /**
+     * Used when no voice provider is connected or a type is unsupported. Edge TTS is real and
+     * keyless; the previous mock "succeeded" with https://example.com/mock-audio.mp3, so videos
+     * were rendered without narration on a default install.
+     */
     public VoiceProvider getFallbackProvider() {
-        return new VoiceProvider() {
-            @Override public String getName() { return "mock-voice"; }
-            @Override public String getDefaultModel() { return "mock-model"; }
-            @Override public List<String> getAvailableModels() { return List.of("mock-model"); }
-            @Override public VoiceResponse synthesize(VoiceRequest request) {
-                return VoiceResponse.ok("https://example.com/mock-audio.mp3", "mock-model", 5, 30);
-            }
-            @Override public boolean testConnection() { return true; }
-        };
+        return new EdgeTtsProvider();
     }
 }
