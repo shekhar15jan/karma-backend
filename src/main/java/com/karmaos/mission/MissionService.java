@@ -27,6 +27,10 @@ import java.util.stream.Collectors;
 @Service
 public class MissionService {
 
+    /** Dark tech look by default; tech audiences and the widget palette favour it over the light whiteboard. */
+    static final String DEFAULT_THEME = "codeatcloud";
+
+
     private final MissionRepository missionRepository;
     private final MissionFlowRepository missionFlowRepository;
     private final FlowRepository flowRepository;
@@ -137,7 +141,7 @@ ExecutionRepository executionRepository,
 
     private String normalizeTheme(String theme) {
         if (theme == null || theme.isBlank()) {
-            return "whiteboard";
+            return DEFAULT_THEME;
         }
         String t = theme.trim().toLowerCase();
         if (!ALLOWED_THEMES.contains(t)) {

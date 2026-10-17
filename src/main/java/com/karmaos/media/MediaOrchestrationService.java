@@ -1072,13 +1072,18 @@ public class MediaOrchestrationService {
         return executionService.saveStep(executionId, step);
     }
 
+    /** Longest subtitle that fits the thumbnail tag at full size. */
+    private static final int THUMBNAIL_SUBTITLE_MAX = 24;
+
     /** Renders a YouTube thumbnail via karma-renderer; a failure never fails the video step. */
     private void saveThumbnail(UUID executionId, UUID missionId, String title, String subtitle) {
         try {
             Map<String, Object> payload = new java.util.LinkedHashMap<>();
             payload.put("title", title);
-            if (subtitle != null && !subtitle.isBlank()) {
-                payload.put("subtitle", subtitle.length() > 30 ? subtitle.substring(0, 30) : subtitle);
+            // A subtitle cut mid-word ("Beginner-friendly explainer: i") looks broken in the feed;
+            // only show one short enough to fit the thumbnail's red tag whole.
+            if (subtitle != null && !subtitle.isBlank() && subtitle.length() <= THUMBNAIL_SUBTITLE_MAX) {
+                payload.put("subtitle", subtitle);
             }
             payload.put("channelName", channelName);
             java.net.http.HttpRequest httpRequest = java.net.http.HttpRequest.newBuilder(
@@ -1151,21 +1156,21 @@ public class MediaOrchestrationService {
             return theme;
         }
         if (executionId == null) {
-            return "whiteboard";
+            return "codeatcloud";
         }
         int seed = (executionId.hashCode() & Integer.MAX_VALUE);
         return ROTATION_THEMES.get(seed % ROTATION_THEMES.size());
     }
 
     private String resolveMissionTheme(UUID missionId) {
-        if (missionId == null) return "whiteboard";
+        if (missionId == null) return "codeatcloud";
         try {
             Mission mission = missionRepository.findById(missionId).orElse(null);
             if (mission != null && mission.getTheme() != null && !mission.getTheme().isBlank()) {
                 return mission.getTheme();
             }
         } catch (Exception ignored) {}
-        return "whiteboard";
+        return "codeatcloud";
     }
 
     /** Forces every scene's visual_spec.theme to the mission theme so the video and
