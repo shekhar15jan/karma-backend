@@ -469,7 +469,7 @@ public class MediaOrchestrationService {
                 if (voiceProvider instanceof EdgeTtsProvider) {
                     sceneRequest.setVoice(voiceProvider.getDefaultModel());
                 }
-                VoiceResponse sceneResponse = voiceProvider.synthesize(sceneRequest);
+                VoiceResponse sceneResponse = synthesizeWithRetry(voiceProvider, sceneRequest);
                 if (!sceneResponse.isSuccess() && !(voiceProvider instanceof EdgeTtsProvider)) {
                     // e.g. a Gemini key is not enabled for Cloud Text-to-Speech (401): fall back to keyless
                     // Edge TTS for this and every remaining scene instead of failing the whole step.
@@ -539,6 +539,25 @@ public class MediaOrchestrationService {
 
         step.setCompletedAt(LocalDateTime.now());
         return executionService.saveStep(executionId, step);
+    }
+
+    /** Edge TTS occasionally times out (asyncio CancelledError); a scene retried a moment later succeeds. */
+    private static final long[] TTS_RETRY_DELAYS_MS = {2_000, 5_000};
+
+    private VoiceResponse synthesizeWithRetry(VoiceProvider voiceProvider, VoiceRequest request) {
+        VoiceResponse response = voiceProvider.synthesize(request);
+        for (long delay : TTS_RETRY_DELAYS_MS) {
+            if (response.isSuccess()) break;
+            log.warn("{} narration failed ({}); retrying in {} ms", voiceProvider.getName(), response.getErrorMessage(), delay);
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            response = voiceProvider.synthesize(request);
+        }
+        return response;
     }
 
     private void persistSceneAudioArtifact(UUID missionId, String name, String audioUrl, long sizeSeconds, int sceneIndex, String reviewStatus) {
@@ -1332,7 +1351,10 @@ public class MediaOrchestrationService {
             } catch (Exception ignored) {}
             
             String perScene = sceneAudio.get(i);
-            scene.setAudioUrl(perScene != null ? perScene : combinedAudio);
+            // The combined narration is the whole video's voiceover: using it for one scene whose
+            // own clip failed made that scene replay the entire narration (a 4-minute video came
+            // out at 11:41). Only fall back to it when no scene has its own clip (legacy single track).
+            scene.setAudioUrl(perScene != null ? perScene : (sceneAudio.isEmpty() ? combinedAudio : null));
             scenes.add(scene);
         }
         return scenes;
