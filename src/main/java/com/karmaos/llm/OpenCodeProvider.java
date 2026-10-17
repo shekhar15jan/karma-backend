@@ -159,6 +159,16 @@ public class OpenCodeProvider implements LLMProvider {
 
             return LLMResponse.ok(content, model, promptTokens, completionTokens, elapsed);
 
+        } catch (org.springframework.web.reactive.function.client.WebClientResponseException e) {
+            // The status line alone ("400 Bad Request") hides the reason, e.g. the free tier being
+            // restricted to the OpenCode app or a retired model id; surface OpenCode's own message.
+            String detail = e.getResponseBodyAsString();
+            try {
+                JsonNode err = objectMapper.readTree(detail).path("error");
+                if (err.hasNonNull("message")) detail = err.get("message").asText();
+            } catch (Exception ignored) {}
+            log.error("OpenCode API call failed: {} {}", e.getStatusCode(), detail);
+            return LLMResponse.error("OpenCode error (" + e.getStatusCode().value() + "): " + detail);
         } catch (Exception e) {
             log.error("OpenCode API call failed", e);
             return LLMResponse.error("OpenCode error: " + e.getMessage());
