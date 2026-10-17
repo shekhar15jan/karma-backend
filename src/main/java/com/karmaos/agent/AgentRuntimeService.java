@@ -31,6 +31,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 @Service
@@ -114,7 +115,7 @@ public class AgentRuntimeService {
             step.setProviderId(primaryProvider != null ? primaryProvider.getId() : null);
 
             LLMResponse response = executeWithRetryAndFallback(agent, primaryProvider, step,
-                    systemPrompt, userMessage, missionId);
+                    systemPrompt, userMessage, StepContextDistiller::isValidOutput);
             String modelUsed = step.getModelUsed();
 
             step.setPromptTokens(response.getPromptTokens());
@@ -141,13 +142,26 @@ public class AgentRuntimeService {
     }
 
     /**
+     * Runs a one-off LLM completion with the agent's configured provider chain (primary, then fallback),
+     * retrying until {@code validator} accepts the output. Used by media steps that need structured
+     * output (e.g. video storyboards) without recording a separate execution step.
+     */
+    public LLMResponse completeForAgent(UUID agentId, String systemPrompt, String userMessage,
+                                        Predicate<String> validator) {
+        Agent agent = agentId != null ? agentRepository.findById(agentId).orElse(null) : null;
+        Provider primaryProvider = agent != null ? resolveProvider(agent) : resolveDefaultProvider();
+        return executeWithRetryAndFallback(agent, primaryProvider, null, systemPrompt, userMessage, validator);
+    }
+
+    /**
      * Runs the LLM call with up to MAX_ATTEMPTS attempts, each time trying the
      * primary provider first and the agent's fallback provider second. The prompt
      * is augmented with a corrective instruction after a failed/empty attempt, so
      * the model gets a chance to produce a valid, non-stub response.
      */
     private LLMResponse executeWithRetryAndFallback(Agent agent, Provider primaryProvider, ExecutionStep step,
-                                                    String systemPrompt, String userMessage, UUID missionId) {
+                                                    String systemPrompt, String userMessage,
+                                                    Predicate<String> validator) {
         final int maxAttempts = 3;
         LLMResponse lastResponse = null;
         String correctiveHint = "";
@@ -176,13 +190,15 @@ public class AgentRuntimeService {
                 request.setTemperature(resolveTemperature(agent));
                 request.setMaxTokens(12000);
 
-                step.setProviderId(provider.getId());
-                step.setModelUsed(modelUsed);
-                step.setPromptUsed(systemPrompt + "\n\n" + userMessage + correctiveHint);
+                if (step != null) {
+                    step.setProviderId(provider.getId());
+                    step.setModelUsed(modelUsed);
+                    step.setPromptUsed(systemPrompt + "\n\n" + userMessage + correctiveHint);
+                }
 
                 lastResponse = llmProvider.chat(request);
 
-                if (lastResponse.isSuccess() && StepContextDistiller.isValidOutput(lastResponse.getContent())) {
+                if (lastResponse.isSuccess() && validator.test(lastResponse.getContent())) {
                     if (attempt > 1 || provider != primaryProvider) {
                         log.info("Agent {} produced valid output on attempt {}/{} via provider {}",
                                 agent != null ? agent.getName() : "?", attempt, maxAttempts, provider.getName());
@@ -211,7 +227,11 @@ public class AgentRuntimeService {
 
         if (lastResponse == null) {
             log.warn("No usable provider for agent {}; returning error", agent != null ? agent.getName() : "?");
-            return LLMResponse.error("No usable LLM provider available");
+            return LLMResponse.error("No AI provider is configured. Connect an LLM provider (with an API key) in the Provider Center.");
+        }
+        if (lastResponse.isSuccess() && !validator.test(lastResponse.getContent())) {
+            return LLMResponse.error("AI provider returned invalid output after " + maxAttempts + " attempts: "
+                    + truncate(lastResponse.getContent(), 160));
         }
         return lastResponse;
     }
@@ -327,19 +347,24 @@ public class AgentRuntimeService {
                 return p;
             }
         }
-        List<Provider> providers = providerRepository.findByStatus("CONNECTED").stream()
+        Provider p = resolveDefaultProvider();
+        if (p != null) {
+            log.info("No default provider for agent {}, using first connected provider with a key: {}", agent.getName(), p.getProviderType());
+        } else {
+            log.warn("No configured provider found for agent {}; the step will fail until an LLM provider is connected", agent.getName());
+        }
+        return p;
+    }
+
+    /** First CONNECTED, non-publishing provider (by name) that has an API key. */
+    private Provider resolveDefaultProvider() {
+        return providerRepository.findByStatus("CONNECTED").stream()
                 .filter(p -> p.getDeletedAt() == null)
                 .filter(p -> !"PUBLISHING".equalsIgnoreCase(p.getProviderType()))
                 .filter(p -> !providerKeyCipher.decrypt(p.getEncryptedApiKey()).isBlank())
                 .sorted(Comparator.comparing(Provider::getName, String.CASE_INSENSITIVE_ORDER))
-                .toList();
-        if (!providers.isEmpty()) {
-            Provider p = providers.get(0);
-            log.info("No default provider for agent {}, using first connected provider with a key: {}", agent.getName(), p.getProviderType());
-            return p;
-        }
-        log.warn("No configured provider found for agent {}, execution will fall back to mock", agent.getName());
-        return null;
+                .findFirst()
+                .orElse(null);
     }
 
     private LLMProvider resolveLLMProvider(Provider provider) {

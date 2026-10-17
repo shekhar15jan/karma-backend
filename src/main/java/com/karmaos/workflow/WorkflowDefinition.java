@@ -22,6 +22,9 @@ public class WorkflowDefinition extends BaseEntity {
     @Column(name = "project_id")
     private UUID projectId;
 
+    @Column(name = "owner_id")
+    private UUID ownerId;
+
     @Column(nullable = false, length = 255)
     private String name;
 

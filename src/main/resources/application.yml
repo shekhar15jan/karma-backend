@@ -53,6 +53,16 @@ app:
     temp-location: ${TEMP_LOCATION:./data/temp}
   workspace:
     max-per-user: ${WORKSPACE_MAX_PER_USER:10}
+  renderer:
+    # karma-renderer (Remotion) service; videos fall back to FFmpeg slides when it is unreachable.
+    url: ${KARMA_RENDERER_URL:http://localhost:3000}
+    timeout-minutes: ${KARMA_RENDERER_TIMEOUT_MINUTES:45}
+  video:
+    channel-name: ${YOUTUBE_CHANNEL_NAME:Karma OS}
+    # Edge TTS voice used when no premium voice provider (ElevenLabs/OpenAI/Google) is connected.
+    voice: ${VIDEO_NARRATION_VOICE:en-US-AndrewNeural}
+    # Optional royalty-free MP3 played under the narration (ducked automatically).
+    music-file: ${VIDEO_MUSIC_FILE:}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}
     allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS

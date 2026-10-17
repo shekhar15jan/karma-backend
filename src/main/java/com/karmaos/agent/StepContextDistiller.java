@@ -101,8 +101,12 @@ public final class StepContextDistiller {
         return result.isEmpty() ? "" : truncate(result);
     }
 
+    /** Max length of a response that can still be a "no material" stub; real deliverables are longer. */
+    private static final int STUB_MAX_CHARS = 600;
+
     public static boolean isStub(String output) {
         if (output == null) return true;
+        if (output.trim().length() > STUB_MAX_CHARS) return false;
         String lower = output.toLowerCase();
         for (String p : STUB_PHRASES) {
             if (lower.contains(p)) return true;

@@ -4,6 +4,11 @@ import com.karmaos.artifact.Artifact;
 import com.karmaos.artifact.ArtifactRepository;
 import com.karmaos.execution.ExecutionStep;
 import com.karmaos.execution.ExecutionService;
+import com.karmaos.media.RendererClient.RenderedVideo;
+import com.karmaos.media.VideoStoryboardService.Scene;
+import com.karmaos.media.VideoStoryboardService.Storyboard;
+import com.karmaos.mission.Mission;
+import com.karmaos.mission.MissionRepository;
 import com.karmaos.provider.Provider;
 import com.karmaos.provider.ProviderKeyCipher;
 import com.karmaos.provider.ProviderRepository;
@@ -12,9 +17,17 @@ import com.karmaos.publishing.PublishRequest;
 import com.karmaos.publishing.PublishingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,7 +40,6 @@ public class MediaOrchestrationService {
 
     private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("openai", "google", "gemini", "stability");
     private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("openai", "google", "gemini", "elevenlabs", "edge-tts", "edge");
-    private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("ffmpeg");
     private static final Map<String, String> CAPABILITY_PROVIDER_MAP = Map.of(
         "image_generation", "openai",
         "audio_generation", "edge-tts"
@@ -35,29 +47,47 @@ public class MediaOrchestrationService {
 
     private final ImageProviderFactory imageProviderFactory;
     private final VoiceProviderFactory voiceProviderFactory;
-    private final VideoProviderFactory videoProviderFactory;
     private final PublishingService publishingService;
     private final ProviderRepository providerRepository;
     private final ProviderKeyCipher providerKeyCipher;
     private final ArtifactRepository artifactRepository;
     private final ExecutionService executionService;
+    private final MissionRepository missionRepository;
+    private final VideoStoryboardService storyboardService;
+    private final RendererClient rendererClient;
+    private final String storageLocation;
+    private final String channelName;
+    private final String narrationVoice;
+    private final String musicFile;
 
     public MediaOrchestrationService(ImageProviderFactory imageProviderFactory,
                                      VoiceProviderFactory voiceProviderFactory,
-                                     VideoProviderFactory videoProviderFactory,
                                      PublishingService publishingService,
                                      ProviderRepository providerRepository,
                                      ProviderKeyCipher providerKeyCipher,
                                      ArtifactRepository artifactRepository,
-                                     ExecutionService executionService) {
+                                     ExecutionService executionService,
+                                     MissionRepository missionRepository,
+                                     VideoStoryboardService storyboardService,
+                                     RendererClient rendererClient,
+                                     @Value("${app.storage.location:./data/artifacts}") String storageLocation,
+                                     @Value("${app.video.channel-name:Karma OS}") String channelName,
+                                     @Value("${app.video.voice:en-US-AndrewNeural}") String narrationVoice,
+                                     @Value("${app.video.music-file:}") String musicFile) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
-        this.videoProviderFactory = videoProviderFactory;
         this.publishingService = publishingService;
         this.providerRepository = providerRepository;
         this.providerKeyCipher = providerKeyCipher;
         this.artifactRepository = artifactRepository;
         this.executionService = executionService;
+        this.missionRepository = missionRepository;
+        this.storyboardService = storyboardService;
+        this.rendererClient = rendererClient;
+        this.storageLocation = storageLocation;
+        this.channelName = channelName;
+        this.narrationVoice = narrationVoice;
+        this.musicFile = musicFile;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
@@ -191,74 +221,58 @@ public class MediaOrchestrationService {
         ExecutionStep step = createStep(executionId, flowId, agentId, stepOrder, "VIDEO_GENERATION", contextData, missionId);
 
         try {
-            Provider provider = resolveProviderForCapability(VIDEO_PROVIDER_TYPES, "ffmpeg");
-            VideoProvider videoProvider = provider != null
-                ? videoProviderFactory.getProvider(provider.getProviderType(), getApiKey(provider))
-                : videoProviderFactory.getFallbackProvider();
-
-            VideoRequest request = new VideoRequest();
-            request.setTitle("Video for Mission " + missionId.toString().substring(0, 8));
-            String script = contextData != null ? contextData : "";
-            if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
-                script += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
-            }
-            request.setScript(script);
-
-            // Collect existing audio and image artifacts
-            List<Artifact> artifacts = artifactRepository.findByMissionIdOrderByCreatedAtDesc(missionId);
-            List<String> imageUrls = new java.util.ArrayList<>();
-            String audioUrl = null;
-
-            for (Artifact a : artifacts) {
-                if ("AUDIO".equals(a.getArtifactType()) && audioUrl == null) {
-                    audioUrl = a.getStorageLocation();
-                } else if ("MEDIA_ASSET".equals(a.getArtifactType()) && "image/png".equals(a.getContentType())) {
-                    if (a.getStorageLocation() != null) {
-                        imageUrls.add(a.getStorageLocation());
-                    }
-                }
-            }
-            if (imageUrls.isEmpty()) {
-                ImageProvider imageProvider = imageProviderFactory.getFallbackProvider();
-                ImageRequest ir = new ImageRequest();
-                ir.setPrompt(script);
-                ir.setSize("1280x720");
-                ir.setN(3);
-                ImageResponse imgResp = imageProvider.generate(ir);
-                if (imgResp.isSuccess() && imgResp.getImageUrls() != null) {
-                    imageUrls.addAll(imgResp.getImageUrls());
-                }
-            }
-            request.setAudioUrl(audioUrl);
-            request.setImageUrls(imageUrls);
-
-            List<VideoScene> scenes = buildScenesFromScript(script, imageUrls);
-            request.setScenes(scenes);
-
+            Mission mission = missionRepository.findById(missionId).orElse(null);
             long start = System.currentTimeMillis();
-            VideoResponse response = videoProvider.generate(request);
+            Storyboard storyboard = storyboardService.build(agentId, mission, contextData, reviewerFeedback);
+            List<String> narrationAudio = synthesizeNarrations(storyboard);
+
+            RenderedVideo rendered = null;
+            String renderer = "Remotion";
+            if (rendererClient.isAvailable()) {
+                try {
+                    rendered = rendererClient.renderVideo(buildRenderPayload(storyboard, narrationAudio));
+                } catch (Exception e) {
+                    log.error("Renderer video failed for mission {}; falling back to FFmpeg: {}", missionId, e.getMessage());
+                }
+            }
+            if (rendered == null) {
+                renderer = "FFmpeg";
+                rendered = renderWithFfmpeg(storyboard, narrationAudio);
+            }
             step.setLatencyMs((int) (System.currentTimeMillis() - start));
 
-            if (response.isSuccess()) {
-                step.setStatus("COMPLETED");
-                step.setOutputData(response.getVideoUrl());
+            Path videoFile = writeMediaFile(missionId, "video", ".mp4", rendered.bytes());
+            Artifact video = new Artifact();
+            video.setMissionId(missionId);
+            video.setName(storyboard.title());
+            video.setArtifactType("VIDEO");
+            video.setStatus("COMPLETED");
+            video.setContentText(storyboard.title() + "\n\n" + storyboard.description());
+            video.setContentType("video/mp4");
+            video.setReviewStatus("PENDING");
+            video.setPublicationStatus("UNPUBLISHED");
+            video.setStorageLocation(videoFile.toUri().toString());
+            video.setSize(rendered.bytes().length);
+            artifactRepository.save(video);
 
-                Artifact artifact = new Artifact();
-                artifact.setMissionId(missionId);
-                artifact.setName("Final Assembled Video");
-                artifact.setArtifactType("VIDEO");
-                artifact.setStatus("COMPLETED");
-                artifact.setContentText(response.getVideoUrl());
-                artifact.setContentType("video/mp4");
-                artifact.setReviewStatus("PENDING");
-                artifact.setPublicationStatus("UNPUBLISHED");
-                artifact.setStorageLocation(response.getVideoUrl());
-                artifact.setSize(response.getDurationSeconds());
-                artifactRepository.save(artifact);
-            } else {
-                step.setStatus("FAILED");
-                step.setErrorMessage(response.getErrorMessage());
-            }
+            List<String> chapters = VideoStoryboardService.chapters(storyboard.scenes(), rendered.sceneStarts());
+            Artifact metadata = new Artifact();
+            metadata.setMissionId(missionId);
+            metadata.setName("YouTube Metadata - " + storyboard.title());
+            metadata.setArtifactType("YOUTUBE_METADATA");
+            metadata.setStatus("COMPLETED");
+            metadata.setContentText(youtubeMetadataMarkdown(storyboard, chapters));
+            metadata.setContentType("text/markdown");
+            metadata.setReviewStatus("PENDING");
+            metadata.setPublicationStatus("UNPUBLISHED");
+            artifactRepository.save(metadata);
+
+            saveThumbnail(missionId, storyboard);
+
+            step.setStatus("COMPLETED");
+            step.setModelUsed(renderer);
+            step.setOutputData("Rendered " + storyboard.scenes().size() + "-scene video (" + rendered.durationSeconds()
+                    + "s) with " + renderer + ": " + storyboard.title());
         } catch (Exception e) {
             log.error("Video step failed: agentId={}", agentId, e);
             step.setStatus("FAILED");
@@ -269,90 +283,179 @@ public class MediaOrchestrationService {
         return executionService.saveStep(executionId, step);
     }
 
-    private List<VideoScene> buildScenesFromScript(String script, List<String> imageUrls) {
-        List<VideoScene> scenes = new java.util.ArrayList<>();
-        if (script == null || script.isBlank()) return scenes;
+    /** Narrates each scene; entries are base64 audio data URIs, or null when synthesis failed. */
+    private List<String> synthesizeNarrations(Storyboard storyboard) {
+        Provider provider = resolveProviderForCapability(Set.of("elevenlabs", "openai", "google", "gemini"), "elevenlabs");
+        String apiKey = provider != null ? getApiKey(provider) : "";
+        VoiceProvider premium = provider != null && !apiKey.isEmpty()
+                && Set.of("elevenlabs", "openai", "google", "gemini").contains(provider.getProviderType().toLowerCase())
+                ? voiceProviderFactory.getProvider(provider.getProviderType(), apiKey)
+                : null;
+        VoiceProvider edge = new EdgeTtsProvider();
 
-        List<String> speakerTexts = new java.util.ArrayList<>();
-        try {
-            String jsonCandidate = extractJson(script);
-            if (jsonCandidate != null) {
-                com.fasterxml.jackson.databind.JsonNode root =
-                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(jsonCandidate);
-                com.fasterxml.jackson.databind.JsonNode body = root.get("script_body");
-                if (body != null && body.isArray()) {
-                    for (com.fasterxml.jackson.databind.JsonNode section : body) {
-                        if (section.hasNonNull("speaker_text")) {
-                            speakerTexts.add(section.get("speaker_text").asText());
-                        }
-                    }
-                }
+        List<String> audio = new ArrayList<>();
+        for (Scene scene : storyboard.scenes()) {
+            String uri = premium != null ? synthesize(premium, scene.narration(), null) : null;
+            if (uri == null) {
+                uri = synthesize(edge, scene.narration(), narrationVoice);
             }
-        } catch (Exception ignored) {
-            // not JSON — treat whole text as a single scene below
+            audio.add(uri);
         }
-
-        if (speakerTexts.isEmpty()) {
-            speakerTexts.add(script);
-        }
-
-        for (int i = 0; i < speakerTexts.size(); i++) {
-            VideoScene scene = new VideoScene();
-            scene.setText(speakerTexts.get(i));
-            if (i < imageUrls.size()) {
-                scene.setImageUrl(imageUrls.get(i));
-            }
-            String narrationUrl = synthesizeNarration(speakerTexts.get(i));
-            if (narrationUrl != null) {
-                scene.setAudioUrl(narrationUrl);
-            }
-            scenes.add(scene);
-        }
-        return scenes;
+        long narrated = audio.stream().filter(java.util.Objects::nonNull).count();
+        log.info("Narrated {}/{} scenes ({})", narrated, audio.size(), premium != null ? premium.getName() + " + Edge fallback" : "Edge TTS");
+        return audio;
     }
 
-    private String extractJson(String input) {
-        if (input == null) return null;
-        int fence = input.indexOf("```");
-        if (fence >= 0) {
-            int start = input.indexOf('{', fence);
-            int end = input.lastIndexOf('}');
-            if (start >= 0 && end > start) {
-                return input.substring(start, end + 1);
-            }
-            int arrStart = input.indexOf('[', fence);
-            int arrEnd = input.lastIndexOf(']');
-            if (arrStart >= 0 && arrEnd > arrStart) {
-                return input.substring(arrStart, arrEnd + 1);
-            }
-            return null;
-        }
-        if (input.startsWith("{") || input.startsWith("[")) {
-            return input;
-        }
-        return null;
-    }
-
-    private String synthesizeNarration(String text) {
-        if (text == null || text.isBlank()) return null;
+    private String synthesize(VoiceProvider voiceProvider, String text, String voice) {
         try {
-            VoiceProvider voiceProvider = new EdgeTtsProvider();
             VoiceRequest request = new VoiceRequest();
             request.setText(text);
             request.setModel(voiceProvider.getDefaultModel());
-            request.setVoice(voiceProvider.getDefaultModel());
-            long start = System.currentTimeMillis();
+            request.setVoice(voice != null && !voice.isBlank() ? voice : voiceProvider.getDefaultModel());
             VoiceResponse response = voiceProvider.synthesize(request);
-            long latency = System.currentTimeMillis() - start;
-            if (response.isSuccess()) {
-                log.info("Scene narration synthesized in {}ms ({} chars)", latency, text.length());
+            // Some providers report success with a placeholder URL when misconfigured; only real audio counts.
+            if (response.isSuccess() && response.getAudioUrl() != null && response.getAudioUrl().startsWith("data:audio")) {
                 return response.getAudioUrl();
             }
-            log.warn("Scene narration failed: {}", response.getErrorMessage());
+            log.warn("{} narration unusable: {}", voiceProvider.getName(),
+                    response.isSuccess() ? "non-audio result" : response.getErrorMessage());
         } catch (Exception e) {
-            log.warn("Scene narration error: {}", e.getMessage());
+            log.warn("{} narration error: {}", voiceProvider.getName(), e.getMessage());
         }
         return null;
+    }
+
+    private Map<String, Object> buildRenderPayload(Storyboard storyboard, List<String> narrationAudio) {
+        List<Map<String, Object>> scenes = new ArrayList<>();
+        for (int i = 0; i < storyboard.scenes().size(); i++) {
+            Scene scene = storyboard.scenes().get(i);
+            Map<String, Object> s = new LinkedHashMap<>();
+            s.put("visualSpec", scene.visual());
+            s.put("narration", scene.narration());
+            if (narrationAudio.get(i) != null) s.put("audio", narrationAudio.get(i));
+            scenes.add(s);
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("fps", 30);
+        payload.put("resolution", Map.of("width", 1920, "height", 1080));
+        payload.put("transition", "fade");
+        payload.put("transitionDuration", 12);
+        payload.put("enableIntro", true);
+        payload.put("introTitle", storyboard.title());
+        if (storyboard.thumbnailSubtitle() != null && !storyboard.thumbnailSubtitle().isBlank()) {
+            payload.put("introSubtitle", storyboard.thumbnailSubtitle());
+        }
+        payload.put("channelName", channelName);
+        payload.put("endPaddingFrames", 180);
+        payload.put("captions", Map.of("burnIn", true, "preset", "youtube", "fontSize", 40,
+                "maxCharsPerLine", 48, "position", 0.9));
+        String music = backgroundMusicDataUri();
+        if (music != null) {
+            payload.put("music", music);
+            payload.put("musicVolume", 0.12);
+        }
+        payload.put("scenes", scenes);
+        return payload;
+    }
+
+    private String backgroundMusicDataUri() {
+        if (musicFile == null || musicFile.isBlank()) return null;
+        try {
+            byte[] bytes = Files.readAllBytes(Path.of(musicFile));
+            return "data:audio/mpeg;base64," + Base64.getEncoder().encodeToString(bytes);
+        } catch (Exception e) {
+            log.warn("Background music {} unreadable: {}", musicFile, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Fallback when karma-renderer is down: simple narrated slides via FFmpeg. */
+    private RenderedVideo renderWithFfmpeg(Storyboard storyboard, List<String> narrationAudio) throws Exception {
+        VideoRequest request = new VideoRequest();
+        request.setTitle(storyboard.title());
+        List<VideoScene> scenes = new ArrayList<>();
+        for (int i = 0; i < storyboard.scenes().size(); i++) {
+            VideoScene scene = new VideoScene();
+            scene.setText(storyboard.scenes().get(i).narration());
+            scene.setAudioUrl(narrationAudio.get(i));
+            scenes.add(scene);
+        }
+        request.setScenes(scenes);
+        VideoResponse response = new FFmpegVideoProvider().generate(request);
+        if (!response.isSuccess()) {
+            throw new IllegalStateException("Renderer unavailable at " + rendererClient.baseUrl()
+                    + " and FFmpeg fallback failed: " + response.getErrorMessage());
+        }
+        Path output = Path.of(URI.create(response.getVideoUrl()));
+        try {
+            return new RenderedVideo(Files.readAllBytes(output), response.getDurationSeconds(), List.of());
+        } finally {
+            FFmpegVideoProvider.deleteWorkDir(output.getParent());
+        }
+    }
+
+    private void saveThumbnail(UUID missionId, Storyboard storyboard) {
+        if (!rendererClient.isAvailable()) return;
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("title", storyboard.thumbnailText());
+            if (storyboard.thumbnailSubtitle() != null) payload.put("subtitle", storyboard.thumbnailSubtitle());
+            payload.put("badges", storyboard.badges());
+            payload.put("channelName", channelName);
+            byte[] png = rendererClient.renderThumbnail(payload);
+            Path file = writeMediaFile(missionId, "thumbnail", ".png", png);
+
+            Artifact thumbnail = new Artifact();
+            thumbnail.setMissionId(missionId);
+            thumbnail.setName("Thumbnail - " + storyboard.title());
+            thumbnail.setArtifactType("THUMBNAIL");
+            thumbnail.setStatus("COMPLETED");
+            thumbnail.setContentText(storyboard.thumbnailText());
+            thumbnail.setContentType("image/png");
+            thumbnail.setReviewStatus("PENDING");
+            thumbnail.setPublicationStatus("UNPUBLISHED");
+            thumbnail.setStorageLocation(file.toUri().toString());
+            thumbnail.setSize(png.length);
+            artifactRepository.save(thumbnail);
+        } catch (Exception e) {
+            log.warn("Thumbnail render failed for mission {}: {}", missionId, e.getMessage());
+        }
+    }
+
+    private Path writeMediaFile(UUID missionId, String kind, String extension, byte[] bytes) throws IOException {
+        Path dir = Path.of(storageLocation).toAbsolutePath().normalize().resolve("media");
+        Files.createDirectories(dir);
+        Path file = dir.resolve(missionId + "-" + kind + "-" + System.currentTimeMillis() + extension);
+        Files.write(file, bytes);
+        return file;
+    }
+
+    /** Extracts the paste-ready description block (description, chapters, hashtags) from the metadata markdown. */
+    private static String youtubeDescription(String markdown) {
+        if (markdown == null) return null;
+        int start = markdown.indexOf("## Description");
+        if (start < 0) return null;
+        int end = markdown.indexOf("## Tags", start);
+        return markdown.substring(start + "## Description".length(), end < 0 ? markdown.length() : end).trim();
+    }
+
+    private static String youtubeMetadataMarkdown(Storyboard storyboard, List<String> chapters) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# ").append(storyboard.title()).append("\n\n");
+        sb.append("## Description\n\n");
+        sb.append(storyboard.description() == null ? "" : storyboard.description().trim()).append("\n\n");
+        if (!chapters.isEmpty()) {
+            sb.append("Chapters:\n");
+            chapters.forEach(line -> sb.append(line).append("\n"));
+            sb.append("\n");
+        }
+        if (!storyboard.tags().isEmpty()) {
+            sb.append(storyboard.tags().stream().limit(3).map(t -> "#" + t.replaceAll("[^A-Za-z0-9]", ""))
+                    .collect(java.util.stream.Collectors.joining(" "))).append("\n\n");
+            sb.append("## Tags\n\n").append(String.join(", ", storyboard.tags())).append("\n");
+        }
+        return sb.toString();
     }
 
     public ExecutionStep executePublishStep(UUID executionId, UUID flowId, UUID agentId,
@@ -366,10 +469,16 @@ public class MediaOrchestrationService {
                     .findFirst()
                     .orElse(artifacts.isEmpty() ? null : artifacts.get(0));
 
+            Artifact metadata = artifacts.stream()
+                    .filter(a -> "YOUTUBE_METADATA".equals(a.getArtifactType()))
+                    .findFirst()
+                    .orElse(null);
+
             PublishRequest request = new PublishRequest();
             String missionName = "Mission " + missionId.toString().substring(0, 8);
             request.setTitle(target != null && target.getName() != null ? target.getName() : "Karma OS Video " + missionName);
-            request.setDescription(contextData != null ? contextData : "Generated by Karma OS");
+            String description = metadata != null ? youtubeDescription(metadata.getContentText()) : null;
+            request.setDescription(description != null ? description : (contextData != null ? contextData : "Generated by Karma OS"));
             request.setContent(contextData);
             if (target != null && target.getStorageLocation() != null) {
                 request.setVideoUrl(target.getStorageLocation());
@@ -388,15 +497,18 @@ public class MediaOrchestrationService {
                     a.setPublicationStatus("PUBLISHED");
                     artifactRepository.save(a);
                 }
-            } else {
-                String reason = publications.isEmpty()
-                        ? "No CONNECTED publishing channels; content produced but not distributed"
-                        : publications.stream()
-                                .map(p -> p.getDestination() + ": " + p.getErrorMessage())
-                                .collect(java.util.stream.Collectors.joining("; "));
-                log.warn("Publish step best-effort completion for mission {}: {}", missionId, reason);
+            } else if (publications.isEmpty()) {
+                // Nothing configured to publish to: the video is ready for manual upload, which is not a failure.
+                log.info("No connected publishing channels for mission {}; video left for manual upload", missionId);
                 step.setStatus("COMPLETED");
-                step.setOutputData("Publish completed (best-effort, no reachable channel): " + reason);
+                step.setOutputData("No publishing channels connected; download the video, thumbnail and YouTube metadata from Artifacts to upload manually.");
+            } else {
+                String reason = publications.stream()
+                        .map(p -> p.getDestination() + ": " + p.getErrorMessage())
+                        .collect(java.util.stream.Collectors.joining("; "));
+                log.warn("Publishing failed on every channel for mission {}: {}", missionId, reason);
+                step.setStatus("FAILED");
+                step.setErrorMessage("Publishing failed on every channel: " + reason);
             }
         } catch (Exception e) {
             log.error("Publish step failed", e);

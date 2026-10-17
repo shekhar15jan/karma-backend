@@ -81,6 +81,7 @@ public class WorkflowService {
     public WorkflowDefinition createDefinition(WorkflowDefinitionRequest request, UUID userId) {
         WorkflowDefinition def = new WorkflowDefinition();
         def.setName(request.getName());
+        def.setOwnerId(userId);
         if (request.getProjectId() != null) {
             ownershipService.getOwnedProject(userId, request.getProjectId());
             def.setProjectId(request.getProjectId());
@@ -213,16 +214,14 @@ public class WorkflowService {
     }
 
     public List<WorkflowDefinition> listAllDefinitions(UUID userId) {
-        return definitionRepository.findAllByOrderByCreatedAtDesc();
+        return definitionRepository.findByOwnerIdOrderByCreatedAtDesc(userId);
     }
 
     @Transactional
     public void deleteDefinition(UUID id, UUID userId) {
         WorkflowDefinition def = definitionRepository.findById(id)
+                .filter(d -> userId.equals(d.getOwnerId()))
                 .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "Workflow not found: " + id));
-        if (def.getProjectId() != null) {
-            ownershipService.getOwnedProject(userId, def.getProjectId());
-        }
         definitionRepository.delete(def);
     }
 

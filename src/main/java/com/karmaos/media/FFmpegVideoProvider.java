@@ -58,7 +58,9 @@ public class FFmpegVideoProvider implements VideoProvider {
             Path output = tempDir.resolve("output.mp4");
 
             if (request.getScenes() != null && !request.getScenes().isEmpty()) {
-                return generateFromScenes(ffmpegPath, request, tempDir, output);
+                VideoResponse response = generateFromScenes(ffmpegPath, request, tempDir, output);
+                if (!response.isSuccess()) deleteWorkDir(tempDir);
+                return response;
             }
 
             if (request.getImageUrls() == null || request.getImageUrls().isEmpty()) {
@@ -113,7 +115,6 @@ public class FFmpegVideoProvider implements VideoProvider {
             int height = parseHeight(request.getResolution());
 
             List<Path> segmentFiles = new ArrayList<>();
-            List<Path> allAudios = new ArrayList<>();
             int sceneIdx = 0;
             for (VideoScene scene : request.getScenes()) {
                 sceneIdx++;
@@ -124,6 +125,7 @@ public class FFmpegVideoProvider implements VideoProvider {
                 int duration = scene.getDurationSeconds() > 0
                     ? scene.getDurationSeconds()
                     : estimateDurationSeconds(scene.getText());
+                // With narration, the segment length follows the audio (see buildSceneSegment).
 
                 Path audio = null;
                 if (scene.getAudioUrl() != null && !scene.getAudioUrl().isBlank()) {
@@ -132,9 +134,6 @@ public class FFmpegVideoProvider implements VideoProvider {
                     } catch (Exception e) {
                         log.warn("Scene {} audio download failed, rendering silently: {}", sceneIdx, e.getMessage());
                     }
-                }
-                if (audio != null && Files.exists(audio)) {
-                    allAudios.add(audio);
                 }
 
                 Path segment = tempDir.resolve("seg_" + sceneIdx + ".mp4");
@@ -159,37 +158,9 @@ public class FFmpegVideoProvider implements VideoProvider {
             cmd.add("0");
             cmd.add("-i");
             cmd.add(concatFile.toAbsolutePath().toString());
-
-            Path mixedAudio = null;
-            if (!allAudios.isEmpty()) {
-                try {
-                    mixedAudio = mixAudios(ffmpegPath, allAudios, tempDir.resolve("mixed.mp3"));
-                    if (mixedAudio != null && Files.exists(mixedAudio)) {
-                        cmd.add("-i");
-                        cmd.add(mixedAudio.toAbsolutePath().toString());
-                    }
-                } catch (Exception e) {
-                    log.warn("Audio mix failed, producing silent video: {}", e.getMessage());
-                }
-            }
-
-            cmd.add("-c:v");
-            cmd.add("libx264");
-            cmd.add("-preset");
-            cmd.add("medium");
-            cmd.add("-crf");
-            cmd.add("23");
-            cmd.add("-pix_fmt");
-            cmd.add("yuv420p");
-
-            if (mixedAudio != null && Files.exists(mixedAudio)) {
-                cmd.add("-c:a");
-                cmd.add("aac");
-                cmd.add("-b:a");
-                cmd.add("128k");
-                cmd.add("-shortest");
-            }
-
+            // Segments share codec parameters and each carries its own audio, so stream-copy them.
+            cmd.add("-c");
+            cmd.add("copy");
             cmd.add(output.toAbsolutePath().toString());
             log.info("Scene concat command: {}", String.join(" ", cmd));
 
@@ -316,20 +287,33 @@ public class FFmpegVideoProvider implements VideoProvider {
             List<String> cmd = new ArrayList<>();
             cmd.add(ffmpegPath);
             cmd.add("-y");
+            boolean hasAudio = audio != null && Files.exists(audio) && Files.size(audio) > 0;
             cmd.add("-loop");
             cmd.add("1");
             cmd.add("-framerate");
             cmd.add(String.valueOf(fps));
-            cmd.add("-t");
-            cmd.add(String.valueOf(Math.max(1, duration)));
+            if (!hasAudio) {
+                cmd.add("-t");
+                cmd.add(String.valueOf(Math.max(1, duration)));
+            }
             cmd.add("-i");
             cmd.add(frame.toAbsolutePath().toString());
 
-            boolean hasAudio = audio != null && Files.exists(audio) && Files.size(audio) > 0;
             if (hasAudio) {
                 cmd.add("-i");
                 cmd.add(audio.toAbsolutePath().toString());
+            } else {
+                cmd.add("-f");
+                cmd.add("lavfi");
+                cmd.add("-t");
+                cmd.add(String.valueOf(Math.max(1, duration)));
+                cmd.add("-i");
+                cmd.add("anullsrc=channel_layout=mono:sample_rate=24000");
             }
+            cmd.add("-map");
+            cmd.add("0:v");
+            cmd.add("-map");
+            cmd.add("1:a");
 
             cmd.add("-c:v");
             cmd.add("libx264");
@@ -341,13 +325,15 @@ public class FFmpegVideoProvider implements VideoProvider {
             cmd.add("yuv420p");
             cmd.add("-r");
             cmd.add(String.valueOf(fps));
-            if (hasAudio) {
-                cmd.add("-c:a");
-                cmd.add("aac");
-                cmd.add("-b:a");
-                cmd.add("128k");
-                cmd.add("-shortest");
-            }
+            cmd.add("-c:a");
+            cmd.add("aac");
+            cmd.add("-ar");
+            cmd.add("24000");
+            cmd.add("-ac");
+            cmd.add("1");
+            cmd.add("-b:a");
+            cmd.add("128k");
+            cmd.add("-shortest");
             cmd.add(segment.toAbsolutePath().toString());
 
             log.info("Scene segment command: {}", String.join(" ", cmd));
@@ -358,41 +344,22 @@ public class FFmpegVideoProvider implements VideoProvider {
         }
     }
 
-    private Path mixAudios(String ffmpegPath, List<Path> audios, Path output) {
-        try {
-            List<String> cmd = new ArrayList<>();
-            cmd.add(ffmpegPath);
-            cmd.add("-y");
-            for (Path a : audios) {
-                cmd.add("-i");
-                cmd.add(a.toAbsolutePath().toString());
-            }
-            cmd.add("-filter_complex");
-            StringBuilder concat = new StringBuilder();
-            for (int i = 0; i < audios.size(); i++) {
-                concat.append("[").append(i).append(":0]");
-            }
-            concat.append("concat=n=").append(audios.size()).append(":v=0:a=1[out]");
-            cmd.add(concat.toString());
-            cmd.add("-map");
-            cmd.add("[out]");
-            cmd.add("-c:a");
-            cmd.add("libmp3lame");
-            cmd.add("-q:a");
-            cmd.add("2");
-            cmd.add(output.toAbsolutePath().toString());
-            log.info("Audio mix command: {}", String.join(" ", cmd));
-            return runFFmpeg(cmd) ? output : null;
-        } catch (Exception e) {
-            log.error("Audio mix failed", e);
-            return null;
-        }
-    }
-
     private int estimateDurationSeconds(String text) {
         if (text == null || text.isBlank()) return 5;
         int words = text.split("\\s+").length;
         return Math.max(5, (int) Math.ceil(words / 2.3));
+    }
+
+    /** Deletes a karma-video-* working directory created by {@link #generate}. */
+    public static void deleteWorkDir(Path dir) {
+        if (dir == null || !dir.getFileName().toString().startsWith("karma-video-")) return;
+        try (var paths = Files.walk(dir)) {
+            paths.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+            });
+        } catch (IOException e) {
+            log.warn("Could not delete video work dir {}: {}", dir, e.getMessage());
+        }
     }
 
     @Override
