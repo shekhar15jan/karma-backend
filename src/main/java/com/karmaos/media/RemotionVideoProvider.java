@@ -169,6 +169,9 @@ public class RemotionVideoProvider implements VideoProvider {
         if (request.getIntroSubtitle() != null && !request.getIntroSubtitle().isBlank()) {
             body.put("introSubtitle", request.getIntroSubtitle());
         }
+        if (request.getChannelName() != null && !request.getChannelName().isBlank()) {
+            body.put("channelName", request.getChannelName());
+        }
         if (request.getMusicUrl() != null && !request.getMusicUrl().isBlank()) {
             String music = toDataUri(request.getMusicUrl());
             if (music != null) {
@@ -235,9 +238,12 @@ public class RemotionVideoProvider implements VideoProvider {
                     sceneNode.put("audio", audio);
                 }
             }
-            // Per-scene captions
+            // Per-scene captions; without explicit cues the renderer times captions from the narration.
             if (scene.getCaptions() != null && !scene.getCaptions().isBlank()) {
                 try { sceneNode.set("captions", objectMapper.readTree(scene.getCaptions())); } catch (Exception e) {}
+            }
+            if (scene.getText() != null && !scene.getText().isBlank() && !scene.getText().trim().startsWith("{")) {
+                sceneNode.put("narration", scene.getText());
             }
             scenes.add(sceneNode);
         }

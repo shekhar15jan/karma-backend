@@ -55,7 +55,6 @@ public class MediaOrchestrationService {
 
     private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "cloudflare");
     private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("google", "gemini", "edge-tts", "edge");
-    private static final Set<String> VIDEO_PROVIDER_TYPES = Set.of("remotion");
     private static final Set<String> MUSIC_PROVIDER_TYPES = Set.of("google-music");
     private static final Map<String, String> CAPABILITY_PROVIDER_MAP = Map.of(
         "image_generation", "google",
@@ -86,6 +85,8 @@ public class MediaOrchestrationService {
     private final ExecutionRepository executionRepository;
     private final AgentSkillRepository agentSkillRepository;
     private final VisualDirectorService visualDirectorService;
+    private final SceneVisualGenerator sceneVisualGenerator;
+    private final String channelName;
     private final OwnershipService ownershipService;
     private final AgentRuntimeService agentRuntimeService;
     private final FlowRepository flowRepository;
@@ -116,7 +117,9 @@ public class MediaOrchestrationService {
                                       OwnershipService ownershipService,
                                       AgentRuntimeService agentRuntimeService,
                                       FlowRepository flowRepository,
-                                      @Value("${RENDERER_URL:http://localhost:3000}") String rendererUrl) {
+                                      SceneVisualGenerator sceneVisualGenerator,
+                                      @Value("${RENDERER_URL:http://localhost:3000}") String rendererUrl,
+                                      @Value("${YOUTUBE_CHANNEL_NAME:Karma OS}") String channelName) {
         this.imageProviderFactory = imageProviderFactory;
         this.voiceProviderFactory = voiceProviderFactory;
         this.videoProviderFactory = videoProviderFactory;
@@ -139,6 +142,8 @@ public class MediaOrchestrationService {
         this.agentRuntimeService = agentRuntimeService;
         this.flowRepository = flowRepository;
         this.rendererUrl = rendererUrl;
+        this.sceneVisualGenerator = sceneVisualGenerator;
+        this.channelName = channelName;
     }
 
     public ExecutionStep executeImageStep(UUID executionId, UUID flowId, UUID agentId,
@@ -449,9 +454,8 @@ public class MediaOrchestrationService {
                 speakerTexts = List.of(text);
             }
             if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
-                for (int i = 0; i < speakerTexts.size(); i++) {
-                    speakerTexts.set(i, speakerTexts.get(i) + "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback);
-                }
+                // Feedback is for the script writer; appending it here would make the narrator read it aloud.
+                log.info("Voice step ignores reviewer feedback (narration is synthesized verbatim): {}", reviewerFeedback);
             }
 
             long start = System.currentTimeMillis();
@@ -859,12 +863,10 @@ public class MediaOrchestrationService {
 
         try {
             requireAgentSkill(agentId);
-            Provider provider = resolveProviderForCapability(VIDEO_PROVIDER_TYPES, "remotion");
-            String providerType = provider != null && provider.getProviderType() != null
-                    ? provider.getProviderType().toLowerCase() : "remotion";
-            VideoProvider videoProvider = provider != null
-                ? videoProviderFactory.getProvider(provider.getProviderType(), getApiKey(provider))
-                : videoProviderFactory.getFallbackProvider();
+            // Remotion is the only video path and needs no API key. Resolving it from CONNECTED providers
+            // picked an unrelated provider (e.g. an LLM) whenever the seeded Remotion row was DISCONNECTED,
+            // which remotion-only mode then rejected.
+            VideoProvider videoProvider = videoProviderFactory.getProvider("remotion", "");
 
             VideoRequest request = new VideoRequest();
             String missionLabel = resolveMissionName(missionId);
@@ -876,7 +878,8 @@ public class MediaOrchestrationService {
             }
             String script = resolveScriptForVideo(executionId, contextData);
             if (reviewerFeedback != null && !reviewerFeedback.isBlank()) {
-                script += "\n\nREVIEWER FEEDBACK ON YOUR PREVIOUS ATTEMPT:\n" + reviewerFeedback;
+                // The script feeds captions and scene text, so feedback must not be appended to it.
+                log.info("Video step received reviewer feedback (not rendered into the video): {}", reviewerFeedback);
             }
             request.setScript(script);
 
@@ -924,6 +927,9 @@ public class MediaOrchestrationService {
                 visualDirectorService.enrichVideoScenes(scenes);
                 log.info("V2 rendering mode enabled — enriched {} scenes with semantic intent", scenes.size());
             }
+            // Scenes whose script section had no visual_spec otherwise render as a blank slide or a
+            // "Scene visual not provided" card.
+            sceneVisualGenerator.fillMissingVisuals(scenes, agentId, missionId, missionLabel);
             applyMissionTheme(scenes, missionId, executionId);
             if (scenes.isEmpty()) {
                 step.setStatus("FAILED");
@@ -956,6 +962,7 @@ public class MediaOrchestrationService {
             request.setMusicUrl(musicUrl);
             request.setIntroTitle(missionLabel);
             request.setIntroSubtitle(resolveMissionSubtitle(missionId));
+            request.setChannelName(channelName);
             // Refinement 1: disable intro for immediate hook (0.0 sec visual+audio)
             request.setEnableIntro(false);
             request.setResolution(runtimeSettings.getString(RuntimeSettings.KEY_VIDEO_RESOLUTION, "1920x1080"));
@@ -975,9 +982,9 @@ public class MediaOrchestrationService {
             VideoCaptionsConfig captionsConfig = new VideoCaptionsConfig();
             captionsConfig.setBurnIn(true);
             captionsConfig.setPreset("youtube");
-            captionsConfig.setPosition(0.85);
-            captionsConfig.setFontSize(28);
-            captionsConfig.setMaxCharsPerLine(42);
+            captionsConfig.setPosition(0.9);
+            captionsConfig.setFontSize(40);
+            captionsConfig.setMaxCharsPerLine(48);
             request.setCaptions(captionsConfig);
             
             // Generate chapters from scenes — prefer chapter_title from visual_spec (YouTube-optimized)
@@ -1040,6 +1047,7 @@ public class MediaOrchestrationService {
                 artifact.setSize(response.getDurationSeconds());
                 artifactStorageService.persist(artifact, missionId);
                 artifactRepository.save(artifact);
+                saveThumbnail(executionId, missionId, missionLabel, request.getIntroSubtitle());
             } else {
                 step.setStatus("FAILED");
                 step.setErrorMessage(response.getErrorMessage());
@@ -1052,6 +1060,50 @@ public class MediaOrchestrationService {
 
         step.setCompletedAt(LocalDateTime.now());
         return executionService.saveStep(executionId, step);
+    }
+
+    /** Renders a YouTube thumbnail via karma-renderer; a failure never fails the video step. */
+    private void saveThumbnail(UUID executionId, UUID missionId, String title, String subtitle) {
+        try {
+            Map<String, Object> payload = new java.util.LinkedHashMap<>();
+            payload.put("title", title);
+            if (subtitle != null && !subtitle.isBlank()) {
+                payload.put("subtitle", subtitle.length() > 30 ? subtitle.substring(0, 30) : subtitle);
+            }
+            payload.put("channelName", channelName);
+            java.net.http.HttpRequest httpRequest = java.net.http.HttpRequest.newBuilder(
+                            java.net.URI.create(rendererUrl.replaceAll("/+$", "") + "/thumbnail"))
+                    .timeout(java.time.Duration.ofMinutes(3))
+                    .header("Content-Type", "application/json")
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(objectMapper.writeValueAsBytes(payload)))
+                    .build();
+            java.net.http.HttpResponse<byte[]> httpResponse = java.net.http.HttpClient.newHttpClient()
+                    .send(httpRequest, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+            if (httpResponse.statusCode() != 200) {
+                log.warn("Thumbnail render returned HTTP {} for mission {}", httpResponse.statusCode(), missionId);
+                return;
+            }
+            java.nio.file.Path dir = java.nio.file.Path.of(System.getProperty("user.home"), ".karma", "media");
+            java.nio.file.Files.createDirectories(dir);
+            java.nio.file.Path file = dir.resolve("thumbnail-" + missionId + "-" + System.currentTimeMillis() + ".png");
+            java.nio.file.Files.write(file, httpResponse.body());
+
+            Artifact thumbnail = new Artifact();
+            thumbnail.setMissionId(missionId);
+            thumbnail.setName("YouTube Thumbnail");
+            thumbnail.setArtifactType("THUMBNAIL");
+            thumbnail.setStatus("COMPLETED");
+            thumbnail.setContentText(title);
+            thumbnail.setContentType("image/png");
+            thumbnail.setReviewStatus(artifactReviewStatus(executionId));
+            thumbnail.setPublicationStatus("UNPUBLISHED");
+            thumbnail.setStorageLocation(file.toUri().toString());
+            thumbnail.setSize(httpResponse.body().length);
+            artifactStorageService.persist(thumbnail, missionId);
+            artifactRepository.save(thumbnail);
+        } catch (Exception e) {
+            log.warn("Thumbnail render failed for mission {}: {}", missionId, e.getMessage());
+        }
     }
 
     private String resolveMissionName(UUID missionId) {
@@ -1525,15 +1577,18 @@ public class MediaOrchestrationService {
                     a.setPublicationStatus("PUBLISHED");
                     artifactRepository.save(a);
                 }
-            } else {
-                String reason = publications.isEmpty()
-                        ? "No CONNECTED publishing channels; content produced but not distributed"
-                        : publications.stream()
-                                .map(p -> p.getDestination() + ": " + p.getErrorMessage())
-                                .collect(java.util.stream.Collectors.joining("; "));
-                log.warn("Publish step best-effort completion for mission {}: {}", missionId, reason);
+            } else if (publications.isEmpty()) {
+                // Nothing configured to publish to: the video is ready for manual upload, which is not a failure.
+                log.info("No connected publishing channels for mission {}; content left for manual upload", missionId);
                 step.setStatus("COMPLETED");
-                step.setOutputData("Publish completed (best-effort, no reachable channel): " + reason);
+                step.setOutputData("No publishing channels connected; download the video from Artifacts to upload it manually.");
+            } else {
+                String reason = publications.stream()
+                        .map(p -> p.getDestination() + ": " + p.getErrorMessage())
+                        .collect(java.util.stream.Collectors.joining("; "));
+                log.warn("Publishing failed on every channel for mission {}: {}", missionId, reason);
+                step.setStatus("FAILED");
+                step.setErrorMessage("Publishing failed on every channel: " + reason);
             }
         } catch (Exception e) {
             log.error("Publish step failed", e);

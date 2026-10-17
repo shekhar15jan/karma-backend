@@ -30,6 +30,8 @@ public class VideoRequest {
     /** Intro card branding (Remotion provider). */
     private String introTitle;
     private String introSubtitle;
+    /** Channel name shown on the intro card and end screen. */
+    private String channelName;
     private String brandingLogo;
     private String brandingFooter;
 

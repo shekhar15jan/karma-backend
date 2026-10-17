@@ -76,6 +76,9 @@ public class WorkflowService {
         UUID projectId = request.getProjectId();
         if (projectId != null) {
             ownershipService.getOwnedProject(userId, projectId);
+        } else {
+            // Without a project the definition would be invisible to its author (listing is project-scoped).
+            projectId = resolveProjectId(userId);
         }
         persistDefinition(request, projectId);
         return flowService.upsertDesignerFlow(request.getName(), request.getDescription(),
@@ -210,10 +213,9 @@ public class WorkflowService {
     @Transactional
     public void deleteDefinition(UUID id, UUID userId) {
         WorkflowDefinition def = definitionRepository.findById(id)
+                .filter(d -> d.getProjectId() != null)
                 .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "Workflow not found: " + id));
-        if (def.getProjectId() != null) {
-            ownershipService.getOwnedProject(userId, def.getProjectId());
-        }
+        ownershipService.getOwnedProject(userId, def.getProjectId());
         definitionRepository.delete(def);
     }
 

@@ -7,6 +7,7 @@ import com.karmaos.auth.UserPrincipal;
 import com.karmaos.common.ApiException;
 import com.karmaos.common.ErrorCode;
 import com.karmaos.execution.ExecutionOrchestrator;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,13 +29,19 @@ public class ArtifactService {
     private final ObjectMapper objectMapper;
     private final ExecutionOrchestrator executionOrchestrator;
     private final OwnershipService ownershipService;
+    /** Directories media providers write into; file: locations outside them are never served. */
+    private final List<Path> mediaRoots;
 
     public ArtifactService(ArtifactRepository artifactRepository, ObjectMapper objectMapper,
-                           ExecutionOrchestrator executionOrchestrator, OwnershipService ownershipService) {
+                           ExecutionOrchestrator executionOrchestrator, OwnershipService ownershipService,
+                           @Value("${app.artifact.storage-root:${STORAGE_LOCATION:/data/artifacts}}") String storageRoot) {
         this.artifactRepository = artifactRepository;
         this.objectMapper = objectMapper;
         this.executionOrchestrator = executionOrchestrator;
         this.ownershipService = ownershipService;
+        this.mediaRoots = List.of(
+                Path.of(storageRoot).toAbsolutePath().normalize(),
+                Path.of(System.getProperty("user.home"), ".karma", "media").toAbsolutePath().normalize());
     }
 
     public List<ArtifactResponse> listAll(UUID userId) {
@@ -65,11 +72,9 @@ public class ArtifactService {
         byte[] bytes = null;
         String contentType = artifact.getContentType();
 
+        // Only storageLocation may reference binary content; contentText is model-written text and
+        // must never be interpreted as a file path.
         String location = artifact.getStorageLocation();
-        if (location == null || location.isBlank()) {
-            location = artifact.getContentText();
-        }
-
         if (location != null && !location.isBlank()) {
             if (location.startsWith("data:")) {
                 int comma = location.indexOf(',');
@@ -88,9 +93,11 @@ public class ArtifactService {
                 }
             } else if (location.startsWith("file:")) {
                 try {
-                    Path path = Path.of(URI.create(location));
-                    bytes = Files.readAllBytes(path);
-                } catch (IOException e) {
+                    Path path = Path.of(URI.create(location)).toAbsolutePath().normalize();
+                    if (isServableMediaFile(path)) {
+                        bytes = Files.readAllBytes(path);
+                    }
+                } catch (IOException | IllegalArgumentException e) {
                     bytes = null;
                 }
             }
@@ -117,6 +124,19 @@ public class ArtifactService {
         }
 
         return new ArtifactContent(bytes, contentType, filename);
+    }
+
+    /** Regular files under a media root, or legacy FFmpeg outputs in karma-video-* temp dirs. */
+    private boolean isServableMediaFile(Path path) {
+        if (Files.isSymbolicLink(path) || !Files.isRegularFile(path)) return false;
+        for (Path root : mediaRoots) {
+            if (path.startsWith(root)) return true;
+        }
+        Path tmp = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize();
+        Path parent = path.getParent();
+        return parent != null && tmp.equals(parent.getParent())
+                && parent.getFileName().toString().startsWith("karma-video-")
+                && path.getFileName().toString().equals("output.mp4");
     }
 
     private String extensionFor(String contentType) {
