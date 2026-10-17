@@ -33,12 +33,12 @@ public class ProviderService {
 
 private static final Set<String> SUPPORTED_PROVIDER_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode",
-            "edge-tts", "edge", "remotion", "google-music", "cloudflare");
+            "edge-tts", "edge", "elevenlabs", "remotion", "google-music", "cloudflare");
 
     private static final Set<String> LLM_TYPES = Set.of(
             "google", "gemini", "groq", "openrouter", "opencode");
 
-    private static final Set<String> VOICE_TYPES = Set.of("edge-tts", "edge");
+    private static final Set<String> VOICE_TYPES = Set.of("edge-tts", "edge", "elevenlabs");
 
     private static final Set<String> IMAGE_TYPES = Set.of("google", "gemini", "cloudflare");
 

@@ -54,7 +54,7 @@ public class MediaOrchestrationService {
     private static final Logger log = LoggerFactory.getLogger(MediaOrchestrationService.class);
 
     private static final Set<String> IMAGE_PROVIDER_TYPES = Set.of("google", "gemini", "cloudflare");
-    private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("google", "gemini", "edge-tts", "edge");
+    private static final Set<String> VOICE_PROVIDER_TYPES = Set.of("google", "gemini", "edge-tts", "edge", "elevenlabs");
     private static final Set<String> MUSIC_PROVIDER_TYPES = Set.of("google-music");
     private static final Map<String, String> CAPABILITY_PROVIDER_MAP = Map.of(
         "image_generation", "google",
@@ -436,7 +436,7 @@ public class MediaOrchestrationService {
             requireAgentSkill(agentId);
             Provider provider = resolveAgentPreferredProvider(agentId, VOICE_PROVIDER_TYPES);
             if (provider == null) {
-                provider = resolveProviderForCapability(VOICE_PROVIDER_TYPES, "edge-tts");
+                provider = resolveVoiceProvider();
             }
             String apiKey = provider != null ? getApiKey(provider) : "";
             boolean keylessVoice = provider != null
@@ -444,6 +444,8 @@ public class MediaOrchestrationService {
             VoiceProvider voiceProvider = (provider != null && (!apiKey.isEmpty() || keylessVoice))
                 ? voiceProviderFactory.getProvider(provider.getProviderType(), apiKey)
                 : voiceProviderFactory.getFallbackProvider();
+            // A provider-specific voice (e.g. an ElevenLabs cloned voice ID) set on the provider.
+            String configuredVoice = provider != null ? configuredVoiceId(provider) : null;
 
             String text = extractNarrationText(contextData);
             if (text == null || text.isBlank()) {
@@ -468,14 +470,23 @@ public class MediaOrchestrationService {
                 sceneRequest.setModel(voiceProvider.getDefaultModel());
                 if (voiceProvider instanceof EdgeTtsProvider) {
                     sceneRequest.setVoice(voiceProvider.getDefaultModel());
+                } else if (configuredVoice != null) {
+                    sceneRequest.setVoice(configuredVoice);
                 }
                 VoiceResponse sceneResponse = synthesizeWithRetry(voiceProvider, sceneRequest);
                 if (!sceneResponse.isSuccess() && !(voiceProvider instanceof EdgeTtsProvider)) {
-                    // e.g. a Gemini key is not enabled for Cloud Text-to-Speech (401): fall back to keyless
-                    // Edge TTS for this and every remaining scene instead of failing the whole step.
-                    log.warn("Voice provider {} failed ({}); switching to Edge TTS for the remaining narration",
-                            voiceProvider.getName(), sceneResponse.getErrorMessage());
+                    // e.g. a Gemini key not enabled for Cloud TTS (401), or an ElevenLabs quota running
+                    // out mid-video (429). Fall back to keyless Edge TTS for the whole narration: switching
+                    // only for the remaining scenes put two different voices in one video.
+                    log.warn("Voice provider {} failed on scene {} ({}); re-voicing every scene with Edge TTS",
+                            voiceProvider.getName(), i + 1, sceneResponse.getErrorMessage());
                     voiceProvider = new EdgeTtsProvider();
+                    if (i > 0) {
+                        sceneAudioUrls.clear();
+                        synthesized = 0;
+                        i = -1;
+                        continue;
+                    }
                     sceneRequest.setModel(voiceProvider.getDefaultModel());
                     sceneRequest.setVoice(voiceProvider.getDefaultModel());
                     sceneResponse = synthesizeWithRetry(voiceProvider, sceneRequest);
@@ -492,12 +503,26 @@ public class MediaOrchestrationService {
                 }
             }
 
-            // Combined narration artifact retained for ffmpeg-provider back-compat.
+            step.setLatencyMs((int) (System.currentTimeMillis() - start));
+            if (synthesized == speakerTexts.size()) {
+                // Every scene has its own clip, which is all the video step uses. Voicing the whole
+                // script again as one track doubled the cost on per-character providers (ElevenLabs),
+                // and a failure of that redundant call failed a step whose scenes had all succeeded.
+                step.setStatus("COMPLETED");
+                step.setOutputData("Synthesized " + synthesized + " scene narration(s) with " + voiceProvider.getName());
+                log.info("Voice step synthesized {} per-scene narration(s) for mission {}", synthesized, missionId);
+                step.setCompletedAt(LocalDateTime.now());
+                return executionService.saveStep(executionId, step);
+            }
+
+            // Some scene has no clip: a single combined narration is the fallback the video step can use.
             VoiceRequest request = new VoiceRequest();
             request.setText(text);
             request.setModel(voiceProvider.getDefaultModel());
             if (voiceProvider instanceof EdgeTtsProvider) {
                 request.setVoice(voiceProvider.getDefaultModel());
+            } else if (configuredVoice != null) {
+                request.setVoice(configuredVoice);
             }
             Double targetSpeed = computeTargetSpeed(missionId, text);
             if (targetSpeed != null) {
@@ -540,6 +565,17 @@ public class MediaOrchestrationService {
 
         step.setCompletedAt(LocalDateTime.now());
         return executionService.saveStep(executionId, step);
+    }
+
+    /** The voice set on a provider as configuration.voiceId (ElevenLabs needs one), or null. */
+    private String configuredVoiceId(Provider provider) {
+        try {
+            String voice = objectMapper.readTree(provider.getConfiguration() == null ? "{}" : provider.getConfiguration())
+                    .path("voiceId").asText("");
+            return voice.isBlank() ? null : voice.trim();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** Edge TTS occasionally times out (asyncio CancelledError); a scene retried a moment later succeeds. */
@@ -1741,6 +1777,27 @@ public class MediaOrchestrationService {
             }
         } catch (Exception e) {
             log.warn("Agent provider resolution failed for agent {}: {}", agentId, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Voice provider when the agent names none: a connected ElevenLabs provider with a key, else
+     * a connected Edge TTS provider, else null (keyless Edge). The generic capability lookup put
+     * any Google provider first, so the Gemini language-model key was used for speech on every
+     * run: it is not enabled for Cloud Text-to-Speech, failed with 401 and fell back to Edge.
+     * Google TTS is still used when an agent selects it explicitly.
+     */
+    private Provider resolveVoiceProvider() {
+        List<Provider> connected = providerRepository.findByStatus("CONNECTED").stream()
+                .filter(p -> p.getDeletedAt() == null && p.getProviderType() != null)
+                .toList();
+        for (String type : List.of("elevenlabs", "edge-tts", "edge")) {
+            for (Provider p : connected) {
+                if (!type.equalsIgnoreCase(p.getProviderType())) continue;
+                if ("elevenlabs".equals(type) && getApiKey(p).isEmpty()) continue;
+                return p;
+            }
         }
         return null;
     }
