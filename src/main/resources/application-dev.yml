@@ -1,11 +1,10 @@
-server:
-  port: 8001
+# Dev profile: port and datasource come from application.yml
+# (server.port 8000, DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD env overrides).
+app:
+  dev-bypass:
+    enabled: true
 
 spring:
-  datasource:
-    url: jdbc:postgresql://localhost:15432/karma_os
-    username: karma_os
-    password: karma_os_dev
   jpa:
     show-sql: true
   devtools:
