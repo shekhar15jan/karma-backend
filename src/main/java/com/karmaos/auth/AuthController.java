@@ -1,6 +1,8 @@
 package com.karmaos.auth;
 
 import com.karmaos.common.ApiResponse;
+import com.karmaos.common.ErrorCode;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -14,9 +16,12 @@ import jakarta.validation.Valid;
 public class AuthController {
 
     private final AuthService authService;
+    private final boolean devBypassEnabled;
 
-    public AuthController(AuthService authService) {
+    public AuthController(AuthService authService,
+                          @Value("${app.dev-bypass.enabled:false}") boolean devBypassEnabled) {
         this.authService = authService;
+        this.devBypassEnabled = devBypassEnabled;
     }
 
     @PostMapping("/register")
@@ -36,6 +41,9 @@ public class AuthController {
 
     @PostMapping("/dev-bypass")
     public ResponseEntity<ApiResponse<AuthResponse>> devBypass(@Valid @RequestBody LoginRequest request) {
+        if (!devBypassEnabled) {
+            throw ErrorCode.NOT_FOUND.exception("Not found");
+        }
         return ResponseEntity.ok(ApiResponse.ok(authService.devBypass(request)));
     }
 }

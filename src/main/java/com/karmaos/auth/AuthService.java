@@ -79,6 +79,9 @@ public class AuthService {
             newUser.setRole("ADMIN");
             return userRepository.save(newUser);
         });
+        if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
+            throw ErrorCode.INVALID_CREDENTIALS.exception("Invalid credentials");
+        }
 
         String accessToken = tokenProvider.generateAccessToken(user.getId(), user.getEmail(), java.util.List.of("ROLE_" + user.getRole()));
         String refreshToken = tokenProvider.generateRefreshToken(user.getId());
