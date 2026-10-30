@@ -10,9 +10,9 @@ import java.util.UUID;
 @Repository
 public interface ArtifactVersionRepository extends JpaRepository<ArtifactVersion, UUID> {
 
-    List<ArtifactVersion> findByArtifactIdOrderByVersionDesc(Long artifactId);
+    List<ArtifactVersion> findByArtifactIdOrderByVersionDesc(UUID artifactId);
 
-    Optional<ArtifactVersion> findByArtifactIdAndVersion(Long artifactId, int version);
+    Optional<ArtifactVersion> findByArtifactIdAndVersion(UUID artifactId, int version);
 
-    Optional<ArtifactVersion> findTopByArtifactIdOrderByVersionDesc(Long artifactId);
+    Optional<ArtifactVersion> findTopByArtifactIdOrderByVersionDesc(UUID artifactId);
 }

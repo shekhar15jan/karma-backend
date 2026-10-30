@@ -14,7 +14,7 @@ import java.util.UUID;
 @AllArgsConstructor
 public class ArtifactVersionResponse {
     private UUID id;
-    private Long artifactId;
+    private UUID artifactId;
     private int version;
     private String contentText;
     private String contentType;

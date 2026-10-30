@@ -20,7 +20,7 @@ import java.util.UUID;
 public class ArtifactVersion extends BaseEntity {
 
     @Column(name = "artifact_id", nullable = false)
-    private Long artifactId;
+    private UUID artifactId;
 
     @Column(nullable = false)
     private int version;
